@@ -35,32 +35,11 @@ export const SurveyStatus: React.FC = () => {
   const [finalAccuracyRecord, setFinalAccuracyRecord] = useState<AccuracyRecord | null>(null);
   const [showAccuracyHistory, setShowAccuracyHistory] = useState(false);
   const [progressPercentage, setProgressPercentage] = useState(0);
-  const [isPositionFixed, setIsPositionFixed] = useState(false); 
-  const [fixedPosition, setFixedPosition] = useState<{ lat: number; lon: number; alt: number } | null>(null);
+  const hasMetTargetAccuracy = survey.currentAccuracy > 0 && survey.currentAccuracy <= survey.targetAccuracy;
+  const showFixedIndicators = !survey.isActive && survey.status !== 'stopped' && hasMetTargetAccuracy;
 
   const requiredTimeSecs = survey.isActive ? survey.requiredTime : configuration.baseStation.surveyDuration;
   const clampedElapsedTime = Math.min(survey.elapsedTime, requiredTimeSecs);
-
-  useEffect(() => {
-    const currentAccuracy = survey.currentAccuracy;
-    const targetAccuracy = survey.targetAccuracy;
-
-    if (survey.isActive && currentAccuracy > 0 && currentAccuracy <= targetAccuracy && !isPositionFixed) {
-      setIsPositionFixed(true);
-      setFixedPosition({
-        lat: survey.position.latitude,
-        lon: survey.position.longitude,
-        alt: survey.position.altitude,
-      });
-    }
-  }, [survey.currentAccuracy, survey.targetAccuracy, survey.isActive, survey.position, isPositionFixed]);
-
-  useEffect(() => {
-    if (!survey.isActive && isPositionFixed) {
-      setIsPositionFixed(false);
-      setFixedPosition(null);
-    }
-  }, [survey.isActive, isPositionFixed]);
 
   useEffect(() => {
     const percentage = requiredTimeSecs > 0
@@ -180,17 +159,17 @@ export const SurveyStatus: React.FC = () => {
   };
 
   const getDisplayStatus = () => {
-    if (survey.status === 'completed') return 'Completed';
-    if (isPositionFixed) return 'Position Fixed';
-    if (!survey.isActive) return survey.status === 'stopped' ? 'Stopped' : 'Idle';
-    return 'In Progress';
+    if (survey.isActive) return 'In Progress';
+    if (survey.status === 'stopped') return 'Stopped';
+    if (showFixedIndicators) return 'Position Fixed';
+    return 'Idle';
   };
 
   const getStatusBadgeColor = () => {
-    if (survey.status === 'completed') return 'bg-emerald-500 text-white';
-    if (isPositionFixed) return 'bg-emerald-500 text-white';
-    if (!survey.isActive) return survey.status === 'stopped' ? 'bg-red-500 text-white' : 'bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300';
-    return survey.status === 'initializing' ? 'bg-blue-500 text-white' : 'bg-amber-500 text-white';
+    if (survey.isActive) return survey.status === 'initializing' ? 'bg-blue-500 text-white' : 'bg-amber-500 text-white';
+    if (survey.status === 'stopped') return 'bg-red-500 text-white';
+    if (showFixedIndicators) return 'bg-emerald-500 text-white';
+    return 'bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300';
   };
 
   const lockedAccuracy = useRef<number>(0);
@@ -380,7 +359,7 @@ export const SurveyStatus: React.FC = () => {
               </div>
             </div>
             <div className="flex flex-col items-end gap-2">
-              {isPositionFixed && (
+              {showFixedIndicators && (
                 <Badge className="bg-emerald-500 text-white border-none gap-1.5 px-2 py-0.5 rounded-full text-[10px]">
                   <span className="size-1.5 bg-white rounded-full animate-pulse" />
                   RTK FIXED

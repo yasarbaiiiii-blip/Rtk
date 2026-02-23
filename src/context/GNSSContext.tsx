@@ -1158,7 +1158,7 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
               },
               localCoordinates: wsLocalCoords,
               isActive: wsActive,
-              status: !wsActive ? 'stopped' : prev.status,
+              status: !wsActive ? 'completed' : prev.status,
             };
           }
 
