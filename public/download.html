@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>GNSS Base Station Downloads</title>
+    <style>
+      :root {
+        --bg-1: #f8fafc;
+        --bg-2: #e2e8f0;
+        --card: #ffffff;
+        --text: #0f172a;
+        --muted: #475569;
+        --border: #cbd5e1;
+        --android: #16a34a;
+        --ios: #2563eb;
+        --web: #7c3aed;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+        color: var(--text);
+        background: radial-gradient(circle at 20% 20%, var(--bg-2), var(--bg-1) 55%);
+        display: grid;
+        place-items: center;
+        padding: 20px;
+      }
+
+      .card {
+        width: min(700px, 100%);
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 20px;
+        box-shadow: 0 20px 60px rgba(15, 23, 42, 0.12);
+        padding: 24px;
+      }
+
+      h1 {
+        margin: 0 0 8px;
+        font-size: 28px;
+        line-height: 1.2;
+      }
+
+      p {
+        margin: 0;
+        color: var(--muted);
+      }
+
+      .hint {
+        margin-top: 14px;
+        padding: 10px 12px;
+        border: 1px dashed var(--border);
+        border-radius: 10px;
+        font-size: 14px;
+      }
+
+      .grid {
+        margin-top: 20px;
+        display: grid;
+        gap: 12px;
+      }
+
+      .btn {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        width: 100%;
+        border-radius: 12px;
+        padding: 14px 16px;
+        text-decoration: none;
+        color: white;
+        font-weight: 700;
+        border: 0;
+      }
+
+      .android {
+        background: var(--android);
+      }
+
+      .ios {
+        background: var(--ios);
+      }
+
+      .web {
+        background: var(--web);
+      }
+
+      .btn small {
+        display: block;
+        font-size: 12px;
+        opacity: 0.9;
+        font-weight: 500;
+      }
+
+      .btn.recommended {
+        outline: 3px solid #f59e0b;
+      }
+
+      .btn.disabled {
+        pointer-events: none;
+        opacity: 0.45;
+      }
+
+      .footer {
+        margin-top: 18px;
+        font-size: 12px;
+        color: var(--muted);
+      }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <h1>GNSS Base Station</h1>
+      <p>Choose your platform to install or open the app.</p>
+      <div class="hint" id="platformHint">Detecting platform...</div>
+
+      <div class="grid">
+        <a id="androidBtn" class="btn android" href="#">
+          <span>
+            Android Install
+            <small>Google Play Internal App Sharing link</small>
+          </span>
+          <span>APK/AAB</span>
+        </a>
+
+        <a id="iosBtn" class="btn ios" href="#">
+          <span>
+            iOS Install
+            <small>TestFlight public invitation link</small>
+          </span>
+          <span>TestFlight</span>
+        </a>
+
+        <a id="webBtn" class="btn web" href="#">
+          <span>
+            Web App
+            <small>Open app in browser (Windows/Mac)</small>
+          </span>
+          <span>Browser</span>
+        </a>
+      </div>
+
+      <div class="footer">
+        Update URLs in this file (`public/download.html`) before publishing.
+      </div>
+    </main>
+
+    <script>
+      // Replace these three URLs with your real links.
+      const LINKS = {
+        android: "https://play.google.com/apps/test/com.rtk.app/INTERNAL_APP_SHARING_LINK",
+        ios: "https://testflight.apple.com/join/YOUR_PUBLIC_CODE",
+        web: "https://your-web-app-url.example.com",
+      };
+
+      const isPlaceholder = (url) =>
+        !url ||
+        url.includes("INTERNAL_APP_SHARING_LINK") ||
+        url.includes("YOUR_PUBLIC_CODE") ||
+        url.includes("your-web-app-url.example.com");
+
+      const setLink = (id, url) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        if (isPlaceholder(url)) {
+          el.classList.add("disabled");
+          el.href = "#";
+          return;
+        }
+        el.href = url;
+        el.target = "_blank";
+        el.rel = "noopener noreferrer";
+      };
+
+      setLink("androidBtn", LINKS.android);
+      setLink("iosBtn", LINKS.ios);
+      setLink("webBtn", LINKS.web);
+
+      const ua = navigator.userAgent || "";
+      const isAndroid = /Android/i.test(ua);
+      const isIOS = /iPhone|iPad|iPod/i.test(ua);
+      const hint = document.getElementById("platformHint");
+      const androidBtn = document.getElementById("androidBtn");
+      const iosBtn = document.getElementById("iosBtn");
+      const webBtn = document.getElementById("webBtn");
+
+      if (isAndroid) {
+        hint.textContent = "Detected Android device. Recommended: Android Install.";
+        androidBtn.classList.add("recommended");
+      } else if (isIOS) {
+        hint.textContent = "Detected iOS device. Recommended: iOS Install (TestFlight).";
+        iosBtn.classList.add("recommended");
+      } else {
+        hint.textContent = "Detected desktop/browser. Recommended: Web App.";
+        webBtn.classList.add("recommended");
+      }
+    </script>
+  </body>
+</html>

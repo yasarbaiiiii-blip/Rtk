@@ -1,0 +1,17 @@
+App/build
+App/Pods
+App/output
+App/App/public
+DerivedData
+xcuserdata
+
+# Cordova plugins for Capacitor
+capacitor-cordova-ios-plugins
+
+# Generated Config files
+App/App/capacitor.config.json
+App/App/config.xml
+/*************  ✨ Windsurf Command ⭐  *************/
+# Build folder for Capacitor CLI
+capacitor/build
+/*******  3922c8a6-cd6e-4398-b765-c2bb28c86370  *******/

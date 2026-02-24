@@ -1,0 +1,29 @@
+node_modules/
+dist/
+.env
+.env.*
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Capacitor / mobile
+ios/App/Pods/
+ios/DerivedData/
+ios/xcuserdata/
+android/.gradle/
+android/.idea/
+android/.project
+android/.settings/
+android/.classpath
+android/app/build/
+android/build/
+
+# Vite
+vite.config.ts.timestamp-*
