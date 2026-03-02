@@ -495,7 +495,7 @@ const AppContent: React.FC = () => {
       </div>
 
       {/* ── Mobile Interactive Bottom Navbar ── */}
-      <nav className="md:hidden fixed bottom-0 left-0 right-0 z-50 bg-white/90 dark:bg-[#020617]/90 backdrop-blur-xl border-t border-slate-200 dark:border-slate-800 pb-[env(safe-area-inset-bottom)]">
+      <nav className="md:hidden fixed bottom-0 left-0 right-0 z-50 bg-white/90 dark:bg-[#020617]/90 backdrop-blur-xl border-t border-slate-200 dark:border-slate-800 mobile-nav-safe">
         <div className="flex items-center justify-between px-3 py-2.5 gap-1">
           {navItems.map((item) => {
             const isActive = currentScreen === item.id;
@@ -524,7 +524,7 @@ const AppContent: React.FC = () => {
       </nav>
 
       {/* ── Main Content Area ── */}
-      <main className="flex-1 overflow-y-auto md:ml-64 mt-[calc(env(safe-area-inset-top,0px)+72px)] mb-[80px] md:mt-0 md:mb-0 overflow-x-hidden">
+      <main className="flex-1 overflow-y-auto md:ml-64 mt-[calc(env(safe-area-inset-top,0px)+72px)] mobile-main-safe md:mt-0 md:mb-0 overflow-x-hidden">
         <div 
           key={currentScreen} 
           className="animate-in fade-in slide-in-from-bottom-8 duration-500 ease-out h-full"

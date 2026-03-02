@@ -2,12 +2,30 @@
 @import './tailwind.css';
 @import './theme.css';
 
+:root {
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --mobile-nav-height: 80px;
+}
+
 .pt-safe {
-  padding-top: env(safe-area-inset-top, 0px);
+  padding-top: var(--safe-top);
 }
 
 .pb-safe {
-  padding-bottom: env(safe-area-inset-bottom, 0px);
+  padding-bottom: var(--safe-bottom);
+}
+
+.mobile-nav-safe {
+  padding-bottom: calc(var(--safe-bottom) + 8px);
+}
+
+.mobile-main-safe {
+  margin-bottom: calc(var(--mobile-nav-height) + var(--safe-bottom) + 8px);
+}
+
+.bottom-safe-offset {
+  bottom: calc(1.5rem + var(--safe-bottom));
 }
 
 

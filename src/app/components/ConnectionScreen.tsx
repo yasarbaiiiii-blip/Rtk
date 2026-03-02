@@ -828,7 +828,7 @@ export const ConnectionScreen: React.FC = () => {
            </Card>
         </div>
 
-        <div className="lg:hidden fixed bottom-6 left-6 right-6 z-50">
+        <div className="lg:hidden fixed bottom-safe-offset left-6 right-6 z-50">
            <div className="bg-slate-900/90 dark:bg-slate-900/95 backdrop-blur-2xl border border-white/10 p-2 rounded-[2.5rem] shadow-2xl flex items-center justify-between gap-2 ring-1 ring-white/20">
               {[
                 { id: 'auto', icon: Radar, label: 'AUTO' },
