@@ -80,9 +80,9 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const intentionalDisconnectRef = useRef(false);
   const startPendingRef = useRef(false);
   const startInitiatedAtRef = useRef(0);
+  const inactiveSurveyReportsRef = useRef(0);
+  const lastSurveyActiveAtRef = useRef(0);
   const START_PENDING_GRACE_MS = 3500;
-  
-  const autoSurveyRunRef = useRef<boolean>(true);
   const STORAGE_KEYS = {
     connection: 'gnss_connection',
     survey: 'gnss_survey',
@@ -246,6 +246,129 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [configuration, setConfiguration] = useState<Configuration>(loadPersistedConfig);
   const [settings, setSettings] = useState<AppSettings>(loadPersistedSettings);
 
+  const persistConfiguration = useCallback((config: Configuration) => {
+    try {
+      localStorage.setItem(STORAGE_KEYS.configuration, JSON.stringify(config));
+    } catch (e) {
+      console.warn('Failed to save configuration:', e);
+    }
+  }, []);
+
+  const syncConfigurationFromBackend = useCallback((payload: any) => {
+    if (!payload || typeof payload !== "object") {
+      return;
+    }
+
+    const sources = [
+      payload,
+      payload.config,
+      payload.configuration,
+      payload.autoflow,
+      payload.survey,
+    ].filter((source) => source && typeof source === "object");
+
+    const readNumber = (...keys: string[]) => {
+      for (const source of sources) {
+        for (const key of keys) {
+          const value = Number((source as Record<string, unknown>)[key]);
+          if (Number.isFinite(value)) {
+            return value;
+          }
+        }
+      }
+      return NaN;
+    };
+
+    const readString = (...keys: string[]) => {
+      for (const source of sources) {
+        for (const key of keys) {
+          const value = (source as Record<string, unknown>)[key];
+          if (typeof value === "string") {
+            return value;
+          }
+        }
+      }
+      return undefined;
+    };
+
+    const readBoolean = (...keys: string[]) => {
+      for (const source of sources) {
+        for (const key of keys) {
+          const value = (source as Record<string, unknown>)[key];
+          if (typeof value === "boolean") {
+            return value;
+          }
+        }
+      }
+      return undefined;
+    };
+
+    const nextDuration = readNumber(
+      "min_duration_sec",
+      "minDurationSec",
+      "survey_duration_sec",
+      "surveyDurationSec",
+      "required_time_sec",
+      "requiredTimeSec",
+      "required_time_seconds",
+      "requiredTimeSeconds",
+      "duration_sec",
+      "durationSeconds"
+    );
+    const nextAccuracyM = readNumber(
+      "accuracy_limit_m",
+      "accuracyLimitM",
+      "target_accuracy_m",
+      "targetAccuracyM",
+      "required_accuracy_m",
+      "requiredAccuracyM"
+    );
+    const nextAccuracyCm = readNumber(
+      "accuracy_limit_cm",
+      "accuracyLimitCm",
+      "target_accuracy_cm",
+      "targetAccuracyCm",
+      "required_accuracy_cm",
+      "requiredAccuracyCm"
+    );
+    const nextPort = readNumber("ntrip_port", "ntripPort");
+    const nextAutoMode = readBoolean("enabled", "auto_mode", "autoMode");
+
+    setConfiguration((prev) => {
+      const next: Configuration = {
+        ...prev,
+        baseStation: {
+          ...prev.baseStation,
+          autoMode: typeof nextAutoMode === "boolean" ? nextAutoMode : prev.baseStation.autoMode,
+          surveyDuration: Number.isFinite(nextDuration) && nextDuration > 0 ? nextDuration : prev.baseStation.surveyDuration,
+          accuracyThreshold:
+            Number.isFinite(nextAccuracyCm) && nextAccuracyCm >= 0
+              ? Math.round(nextAccuracyCm)
+              : Number.isFinite(nextAccuracyM) && nextAccuracyM >= 0
+              ? Math.round(nextAccuracyM * 100)
+              : prev.baseStation.accuracyThreshold,
+        },
+        streams: {
+          ...prev.streams,
+          ntrip: {
+            ...prev.streams.ntrip,
+            server: readString("ntrip_host", "ntripHost") || prev.streams.ntrip.server,
+            port: Number.isFinite(nextPort) && nextPort > 0 ? nextPort : prev.streams.ntrip.port,
+            mountpoint: readString("ntrip_mountpoint", "ntripMountpoint") ?? prev.streams.ntrip.mountpoint,
+            password: readString("ntrip_password", "ntripPassword") ?? prev.streams.ntrip.password,
+            username: readString("ntrip_username", "ntripUsername") ?? prev.streams.ntrip.username,
+          },
+        },
+      };
+
+      const changed = JSON.stringify(next) !== JSON.stringify(prev);
+      if (changed) {
+        persistConfiguration(next);
+      }
+      return changed ? next : prev;
+    });
+  }, [persistConfiguration]);
+
   useEffect(() => {
     try {
       const rawConnection = localStorage.getItem(STORAGE_KEYS.connection);
@@ -375,28 +498,18 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
   /* ================= HELPER FUNCTIONS ================= */
 
   useEffect(() => {
-    const syncAutoMode = () => {
+    const syncAutoFlowConfig = () => {
       api.getAutoFlowConfig()
         .then((cfg) => {
-          if (typeof cfg.enabled === 'boolean') {
-            setConfiguration(prev => {
-              if (prev.baseStation.autoMode === cfg.enabled) return prev; 
-              const updated = {
-                ...prev,
-                baseStation: { ...prev.baseStation, autoMode: cfg.enabled },
-              };
-              localStorage.setItem(STORAGE_KEYS.configuration, JSON.stringify(updated));
-              return updated;
-            });
-          }
+          syncConfigurationFromBackend(cfg);
         })
-        .catch(() => { }); 
+        .catch(() => { });
     };
 
-    syncAutoMode(); 
-    const interval = setInterval(syncAutoMode, 5000);
+    syncAutoFlowConfig();
+    const interval = setInterval(syncAutoFlowConfig, 5000);
     return () => clearInterval(interval);
-  }, []);
+  }, [syncConfigurationFromBackend]);
 
   const addLog = useCallback((level: 'error' | 'warning' | 'info', message: string) => {
     setLogs((prev) => [{ id: Date.now().toString() + Math.random(), timestamp: new Date(), level, message }, ...prev].slice(0, 500));
@@ -432,7 +545,12 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
     wsRef.current.onopen = () => {
       setConnection((prev) => ({ ...prev, isConnected: true, lastConnectedTimestamp: new Date() }));
       addLog('info', 'WebSocket connected');
-      
+      void api.getAutoFlowConfig()
+        .then((cfg) => {
+          syncConfigurationFromBackend(cfg);
+        })
+        .catch(() => { });
+
       // ⭐ MEMORY STORAGE RULE: The moment connection is successful, securely write the IP to memory
       try {
         localStorage.setItem(STORAGE_KEYS.lastWs, activeWsUrlRef.current);
@@ -468,15 +586,20 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
           },
         });
 
+        syncConfigurationFromBackend(data);
+
         if (data.autoflow !== undefined) {
           setIsAutoFlowActive(data.autoflow.active ?? false);
         }
 
         setSurvey((prev) => {
           const wsActive = data.survey?.active ?? false;
+          const wsValid = data.survey?.valid ?? false;
           if (stoppingRef.current) return prev;
 
           const wsAccuracy = (data.survey?.accuracy_m ?? 0) * 100;
+          const wsElapsed = data.survey?.progress_seconds ?? prev.elapsedTime;
+          const nextActiveElapsed = Math.max(prev.elapsedTime, wsElapsed);
           
           const parseVal = (val: any) => val !== undefined && val !== null ? Number(val) : undefined;
           const pos = data.survey?.position || data.survey?.local_position || {};
@@ -495,11 +618,13 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
           if (wsActive && !prev.isActive) {
             startPendingRef.current = false;
+            inactiveSurveyReportsRef.current = 0;
+            lastSurveyActiveAtRef.current = Date.now();
             return {
               ...prev,
               isActive: true,
               status: "in-progress",
-              elapsedTime: data.survey?.progress_seconds ?? 0,
+              elapsedTime: wsElapsed,
               currentAccuracy: wsAccuracy,
               satelliteCount: data.gnss?.num_satellites ?? 0,
               localCoordinates: wsLocalCoords,
@@ -509,11 +634,21 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
           if (prev.isActive) {
             if (wsActive) {
               startPendingRef.current = false;
+              inactiveSurveyReportsRef.current = 0;
+              lastSurveyActiveAtRef.current = Date.now();
             }
             const shouldUpdateAccuracy = wsAccuracy > 0 && wsAccuracy < 5000;
+            const shouldTreatInactiveAsFinal =
+              !wsActive &&
+              (
+                wsValid ||
+                wsElapsed >= prev.requiredTime ||
+                (wsAccuracy > 0 && wsAccuracy <= prev.targetAccuracy)
+              );
             if (withinStartGrace) {
               return {
                 ...prev,
+                elapsedTime: nextActiveElapsed,
                 satelliteCount: data.gnss?.num_satellites ?? prev.satelliteCount,
                 currentAccuracy: shouldUpdateAccuracy ? wsAccuracy : prev.currentAccuracy,
                 position: {
@@ -525,8 +660,32 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
                 localCoordinates: wsLocalCoords,
               };
             }
+
+            if (!wsActive && !shouldTreatInactiveAsFinal) {
+              inactiveSurveyReportsRef.current += 1;
+              if (
+                inactiveSurveyReportsRef.current < 3 ||
+                (Date.now() - lastSurveyActiveAtRef.current) < 5000
+              ) {
+                return {
+                  ...prev,
+                  satelliteCount: data.gnss?.num_satellites ?? prev.satelliteCount,
+                  currentAccuracy: shouldUpdateAccuracy ? wsAccuracy : prev.currentAccuracy,
+                  position: {
+                    latitude: data.gnss?.latitude ?? prev.position.latitude,
+                    longitude: data.gnss?.longitude ?? prev.position.longitude,
+                    altitude: data.gnss?.altitude_msl ?? prev.position.altitude,
+                    accuracy: data.gnss?.horizontal_accuracy ?? prev.position.accuracy,
+                  },
+                  localCoordinates: wsLocalCoords,
+                };
+              }
+            }
+
             return {
               ...prev,
+              elapsedTime: wsActive ? nextActiveElapsed : Math.max(wsElapsed, prev.elapsedTime, prev.requiredTime),
+              progress: wsActive ? Math.min(nextActiveElapsed / Math.max(prev.requiredTime, 1), 1) : 1,
               satelliteCount: data.gnss?.num_satellites ?? prev.satelliteCount,
               currentAccuracy: shouldUpdateAccuracy ? wsAccuracy : prev.currentAccuracy,
               position: {
@@ -555,7 +714,7 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
         setConnection((prev) => ({ ...prev, isConnected: false }));
       }
     };
-  }, [addLog]);
+  }, [addLog, syncConfigurationFromBackend]);
 
   useEffect(() => {
     const reconnectTimer = setInterval(() => {
@@ -574,17 +733,12 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
   /* ================= START SURVEY ================= */
   const startSurvey = useCallback(async () => {
     try {
-      if (!streams.ntrip.active) {
-        const msg = 'Start NTRIP Sender first. Survey can begin only while NTRIP is streaming.';
-        addLog('warning', msg);
-        toast.error(msg);
-        throw new Error(msg);
-      }
-
       const currentDuration = configuration.baseStation.surveyDuration;
       const currentAccuracy = configuration.baseStation.accuracyThreshold;
       startPendingRef.current = true;
       startInitiatedAtRef.current = Date.now();
+      inactiveSurveyReportsRef.current = 0;
+      lastSurveyActiveAtRef.current = Date.now();
 
       setSurvey((prev) => ({
         ...prev,
@@ -619,7 +773,7 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setSurvey((prev) => ({ ...prev, isActive: false, status: "failed" }));
       throw error;
     }
-  }, [configuration.baseStation.surveyDuration, configuration.baseStation.accuracyThreshold, streams.ntrip.active, addLog]);
+  }, [configuration.baseStation.surveyDuration, configuration.baseStation.accuracyThreshold, addLog]);
 
   /* ================= STOP SURVEY ================= */
   const stopSurvey = useCallback(async () => {
@@ -726,6 +880,7 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
     intentionalDisconnectRef.current = true;
     stoppingRef.current = false;
     startPendingRef.current = false;
+    inactiveSurveyReportsRef.current = 0;
     setSurvey(prev => ({ ...prev, isActive: false, status: 'idle' }));
     setIsAutoFlowActive(false);
     wsRef.current?.close();
@@ -767,18 +922,9 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
   /* ================= CONFIG & SETTINGS ================= */
   const updateConfiguration = useCallback((config: Configuration) => {
     setConfiguration(config);
-    try {
-      localStorage.setItem(STORAGE_KEYS.configuration, JSON.stringify(config));
-    } catch (e) {
-      console.warn('Failed to save configuration:', e);
-    }
-
-    if (config.baseStation.autoMode) {
-      autoSurveyRunRef.current = false;
-    }
-
+    persistConfiguration(config);
     addLog('info', 'Configuration saved');
-  }, [addLog]);
+  }, [addLog, persistConfiguration]);
 
   const updateSettings = useCallback((patch: Partial<AppSettings>) => {
     setSettings((prev) => {
@@ -839,21 +985,6 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   }, [addLog]);
 
-  /* ================= SURVEY TIMER ================= */
-  useEffect(() => {
-    if (!survey.isActive) return;
-
-    const surveyInterval = setInterval(() => {
-      setSurvey((prev) => {
-        const newElapsedTime = prev.elapsedTime + 1;
-        const progress = Math.min(newElapsedTime / prev.requiredTime, 1);
-        return { ...prev, elapsedTime: newElapsedTime, progress };
-      });
-    }, 1000);
-
-    return () => clearInterval(surveyInterval);
-  }, [survey.isActive]);
-
   /* ================= SURVEY STATUS POLL ================= */
   useEffect(() => {
     const pollInterval = setInterval(async () => {
@@ -863,10 +994,13 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
       try {
         const surveyStatus = await api.getSurveyStatus();
         if (surveyStatus && !stoppingRef.current) {
+          syncConfigurationFromBackend(surveyStatus);
           setSurvey((prev) => {
             const pollAccuracy = (surveyStatus.accuracy_m ?? 0) * 100;
             const pollElapsed = surveyStatus.progress_seconds ?? prev.elapsedTime;
             const pollActive = surveyStatus.active ?? prev.isActive;
+            const pollValid = surveyStatus.valid ?? false;
+            const nextActiveElapsed = Math.max(prev.elapsedTime, pollElapsed);
             const withinStartGrace =
               startPendingRef.current &&
               prev.isActive &&
@@ -885,20 +1019,50 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
             if (pollActive) {
               startPendingRef.current = false;
+              inactiveSurveyReportsRef.current = 0;
+              lastSurveyActiveAtRef.current = Date.now();
             }
 
             if (withinStartGrace) {
               return {
                 ...prev,
-                elapsedTime: pollElapsed > 0 ? pollElapsed : prev.elapsedTime,
+                elapsedTime: nextActiveElapsed,
+                progress: Math.min(nextActiveElapsed / Math.max(prev.requiredTime, 1), 1),
                 currentAccuracy: pollAccuracy > 0 ? pollAccuracy : prev.currentAccuracy,
                 localCoordinates: pollLocalCoords,
               };
             }
 
+            const shouldTreatInactiveAsFinal =
+              !pollActive &&
+              (
+                pollValid ||
+                pollElapsed >= prev.requiredTime ||
+                (pollAccuracy > 0 && pollAccuracy <= prev.targetAccuracy)
+              );
+
+            if (!pollActive && prev.isActive && !shouldTreatInactiveAsFinal) {
+              inactiveSurveyReportsRef.current += 1;
+              if (
+                inactiveSurveyReportsRef.current < 3 ||
+                (Date.now() - lastSurveyActiveAtRef.current) < 5000
+              ) {
+                return {
+                  ...prev,
+                  currentAccuracy: pollAccuracy > 0 ? pollAccuracy : prev.currentAccuracy,
+                  localCoordinates: pollLocalCoords,
+                };
+              }
+            }
+
             return {
               ...prev,
-              elapsedTime: pollElapsed > 0 ? pollElapsed : prev.elapsedTime,
+              elapsedTime: pollActive
+                ? nextActiveElapsed
+                : Math.max(pollElapsed, prev.elapsedTime, prev.requiredTime),
+              progress: pollActive
+                ? Math.min(nextActiveElapsed / Math.max(prev.requiredTime, 1), 1)
+                : 1,
               currentAccuracy: pollAccuracy > 0 ? pollAccuracy : prev.currentAccuracy,
               isActive: pollActive,
               localCoordinates: pollLocalCoords,
@@ -912,7 +1076,7 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }, survey.isActive ? 2000 : 5000);
 
     return () => clearInterval(pollInterval);
-  }, [survey.isActive, connection.isConnected]);
+  }, [survey.isActive, connection.isConnected, syncConfigurationFromBackend]);
 
   /* ================= UNIFIED SURVEY LIFECYCLE WATCHER ================= */
   const prevIsActive = useRef(survey.isActive);
@@ -981,31 +1145,8 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   /* ================= NTRIP STATUS POLL ================= */
   useEffect(() => {
-    if (!connection.isConnected || isNtripUserArmed) return;
-
-    // Enforce "manual start only" policy when app connects or restarts.
-    setStreams((prev) => ({
-      ...prev,
-      ntrip: {
-        ...prev.ntrip,
-        enabled: false,
-        active: false,
-        throughput: 0,
-        uptime: 0,
-        dataSent: 0,
-        lastError: null,
-      },
-    }));
-
-    void api.stopNTRIP().catch(() => {
-      // Best effort only; if backend is unreachable we still keep local NTRIP disabled.
-    });
-  }, [connection.isConnected, isNtripUserArmed]);
-
-  useEffect(() => {
     const pollInterval = setInterval(async () => {
       if (!connection.isConnected) return;
-      if (!isNtripUserArmed) return;
       try {
         const ntripStatus = await api.getNTRIP();
         if (ntripStatus) {
@@ -1028,28 +1169,7 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
     }, 2000);
     return () => clearInterval(pollInterval);
-  }, [connection.isConnected, isNtripUserArmed]);
-
-  /* ================= AUTO MODE ================= */
-  useEffect(() => {
-    if (
-      configuration.baseStation.autoMode &&
-      !survey.isActive &&
-      connection.isConnected &&
-      !stoppingRef.current &&
-      !autoSurveyRunRef.current 
-    ) {
-      autoSurveyRunRef.current = true; 
-
-      const timer = setTimeout(() => {
-        startSurvey().catch(err => {
-          console.error("Auto start failed", err);
-          addLog('error', `Auto start failed: ${String(err)}`);
-        });
-      }, 500);
-      return () => clearTimeout(timer);
-    }
-  }, [configuration.baseStation.autoMode, connection.isConnected, survey.isActive, startSurvey, addLog]);
+  }, [connection.isConnected]);
 
   /* ================= CONFIG SYNC ================= */
   useEffect(() => {

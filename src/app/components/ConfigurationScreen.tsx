@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useGNSS } from '../../context/GNSSContext';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
 import { Button } from './ui/button';
@@ -39,7 +39,7 @@ const SectionCard: React.FC<{
   icon: any;
   children: React.ReactNode;
   isMobile: boolean;
-  handleSave: () => void;
+  handleSave: () => Promise<boolean>;
 }> = ({ title, description, icon: Icon, children, isMobile, handleSave }) => {
   const [isOpen, setIsOpen] = useState(false);
 
@@ -91,7 +91,15 @@ const SectionCard: React.FC<{
 
              {/* Sticky Native Footer */}
              <div className="p-4 border-t border-slate-200 dark:border-slate-800 bg-white/90 dark:bg-slate-900/90 backdrop-blur-md pb-safe shrink-0">
-                <Button onClick={() => { handleSave(); setIsOpen(false); }} className="w-full h-11 rounded-lg text-sm font-semibold bg-blue-600 hover:bg-blue-700 text-white shadow-sm">
+                <Button
+                  onClick={async () => {
+                    const saved = await handleSave();
+                    if (saved) {
+                      setIsOpen(false);
+                    }
+                  }}
+                  className="w-full h-11 rounded-lg text-sm font-semibold bg-blue-600 hover:bg-blue-700 text-white shadow-sm"
+                >
                   Save & Close
                 </Button>
              </div>
@@ -126,6 +134,7 @@ const SectionCard: React.FC<{
 export const ConfigurationScreen: React.FC = () => {
   const { configuration, updateConfiguration, survey, streams, gnssStatus, startNTRIP, stopNTRIP } = useGNSS();
   const [config, setConfig] = useState(configuration);
+  const lastAppliedConfigRef = useRef(JSON.stringify(configuration));
   const [activeMsgType, setActiveMsgType] = useState<'MSM4' | 'MSM7'>('MSM4');
   const [rtcmActiveMessages, setRtcmActiveMessages] = useState<string[]>([]);
   const [rtcmLoading, setRtcmLoading] = useState(true);
@@ -178,18 +187,16 @@ export const ConfigurationScreen: React.FC = () => {
       })
       .catch((e) => console.warn('RTCM status fetch failed:', e))
       .finally(() => setRtcmLoading(false));
-
-    api.getAutoFlowConfig()
-      .then((cfg) => {
-        if (typeof cfg.enabled === 'boolean') {
-          setConfig(prev => ({
-            ...prev,
-            baseStation: { ...prev.baseStation, autoMode: cfg.enabled },
-          }));
-        }
-      })
-      .catch((e) => console.warn('Autoflow config fetch failed:', e));
   }, []);
+
+  useEffect(() => {
+    const nextSerialized = JSON.stringify(configuration);
+    setConfig((prev) => {
+      const hasUnsavedLocalChanges = JSON.stringify(prev) !== lastAppliedConfigRef.current;
+      lastAppliedConfigRef.current = nextSerialized;
+      return hasUnsavedLocalChanges ? prev : configuration;
+    });
+  }, [configuration]);
 
   const handleMsmTypeChange = async (type: 'MSM4' | 'MSM7') => {
     setActiveMsgType(type);
@@ -206,34 +213,82 @@ export const ConfigurationScreen: React.FC = () => {
     toast.success(`Message ${msgId} set to ${hz} Hz`);
   };
 
-  const handleSave = async () => {
+  const normalizeSavedConfig = (saved: any) => {
+    const backendConfig = saved?.config ?? {};
+    return {
+      ...config,
+      baseStation: {
+        ...config.baseStation,
+        autoMode: typeof saved?.enabled === 'boolean' ? saved.enabled : config.baseStation.autoMode,
+        surveyDuration: Number.isFinite(Number(backendConfig.min_duration_sec))
+          ? Number(backendConfig.min_duration_sec)
+          : config.baseStation.surveyDuration,
+        accuracyThreshold: Number.isFinite(Number(backendConfig.accuracy_limit_m))
+          ? Math.round(Number(backendConfig.accuracy_limit_m) * 100)
+          : config.baseStation.accuracyThreshold,
+      },
+      streams: {
+        ...config.streams,
+        ntrip: {
+          ...config.streams.ntrip,
+          server: typeof backendConfig.ntrip_host === 'string' && backendConfig.ntrip_host.length > 0
+            ? backendConfig.ntrip_host
+            : config.streams.ntrip.server,
+          port: Number.isFinite(Number(backendConfig.ntrip_port))
+            ? Number(backendConfig.ntrip_port)
+            : config.streams.ntrip.port,
+          mountpoint: typeof backendConfig.ntrip_mountpoint === 'string' && backendConfig.ntrip_mountpoint.length > 0
+            ? backendConfig.ntrip_mountpoint
+            : config.streams.ntrip.mountpoint,
+          password: typeof backendConfig.ntrip_password === 'string' && backendConfig.ntrip_password.length > 0
+            ? backendConfig.ntrip_password
+            : config.streams.ntrip.password,
+          username: typeof backendConfig.ntrip_username === 'string'
+            ? backendConfig.ntrip_username
+            : config.streams.ntrip.username,
+        },
+      },
+    };
+  };
+
+  const handleSave = async (): Promise<boolean> => {
     uiLogger.log('Save Configuration clicked', 'ConfigurationScreen', config);
     try {
-      if (config.baseStation.autoMode) {
-        await api.enableAutoFlow({
-          msm_type: activeMsgType, 
-          min_duration_sec: config.baseStation.surveyDuration,
-          accuracy_limit_m: config.baseStation.accuracyThreshold / 100,
-          ntrip_host: config.streams.ntrip.server,
-          ntrip_port: config.streams.ntrip.port,
-          ntrip_mountpoint: config.streams.ntrip.mountpoint,
-          ntrip_password: config.streams.ntrip.password,
-          ntrip_username: config.streams.ntrip.username,
-        });
-      } else {
+      const payload = {
+        msm_type: activeMsgType,
+        min_duration_sec: config.baseStation.surveyDuration,
+        accuracy_limit_m: config.baseStation.accuracyThreshold / 100,
+        ntrip_host: config.streams.ntrip.server,
+        ntrip_port: config.streams.ntrip.port,
+        ntrip_mountpoint: config.streams.ntrip.mountpoint,
+        ntrip_password: config.streams.ntrip.password,
+        ntrip_username: config.streams.ntrip.username,
+      };
+
+      await api.enableAutoFlow(payload);
+
+      if (!config.baseStation.autoMode) {
         await api.disableAutoFlow();
       }
 
-      updateConfiguration(config); 
+      const savedConfig = await api.getAutoFlowConfig();
+      const nextConfig = normalizeSavedConfig(savedConfig);
+
+      lastAppliedConfigRef.current = JSON.stringify(nextConfig);
+      setConfig(nextConfig);
+      updateConfiguration(nextConfig);
       uiLogger.log('Configuration saved', 'ConfigurationScreen');
       toast.success('Configuration saved successfully');
+      return true;
     } catch (e) {
       toast.error(`Failed to save configuration: ${e}`);
+      return false;
     }
   };
 
   const handleReset = () => {
     uiLogger.log('Reset Configuration clicked', 'ConfigurationScreen');
+    lastAppliedConfigRef.current = JSON.stringify(configuration);
     setConfig(configuration);
     toast.info('Configuration reset to defaults');
   };

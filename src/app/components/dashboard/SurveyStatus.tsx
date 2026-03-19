@@ -536,12 +536,49 @@ export const SurveyStatus: React.FC = () => {
   const [accuracyHistory, setAccuracyHistory] = useState<AccuracyRecord[]>([]);
   const [finalAccuracyRecord, setFinalAccuracyRecord] = useState<AccuracyRecord | null>(null);
   const [showAccuracyHistory, setShowAccuracyHistory] = useState(false);
+  const [displayElapsedTime, setDisplayElapsedTime] = useState(0);
+  const lastSyncedElapsedRef = useRef(0);
+  const lastSyncedAtRef = useRef(Date.now());
   const [progressPercentage, setProgressPercentage] = useState(0);
   const hasMetTargetAccuracy = survey.currentAccuracy > 0 && survey.currentAccuracy <= survey.targetAccuracy;
   const showFixedIndicators = !survey.isActive && survey.status !== 'stopped' && hasMetTargetAccuracy;
 
-  const requiredTimeSecs = survey.isActive ? survey.requiredTime : configuration.baseStation.surveyDuration;
-  const clampedElapsedTime = Math.min(survey.elapsedTime, requiredTimeSecs);
+  const requiredTimeSecs = survey.requiredTime > 0 ? survey.requiredTime : configuration.baseStation.surveyDuration;
+
+  useEffect(() => {
+    if (survey.isActive) {
+      const backendElapsed = Math.max(lastSyncedElapsedRef.current, survey.elapsedTime);
+      lastSyncedElapsedRef.current = backendElapsed;
+      lastSyncedAtRef.current = Date.now();
+      setDisplayElapsedTime(backendElapsed);
+      return;
+    }
+
+    const settledElapsed = survey.status === 'completed'
+      ? requiredTimeSecs
+      : Math.min(survey.elapsedTime, requiredTimeSecs);
+    lastSyncedElapsedRef.current = settledElapsed;
+    lastSyncedAtRef.current = Date.now();
+    setDisplayElapsedTime(settledElapsed);
+  }, [survey.elapsedTime, survey.isActive, survey.status, requiredTimeSecs]);
+
+  useEffect(() => {
+    if (!survey.isActive) {
+      return;
+    }
+
+    const timer = setInterval(() => {
+      const secondsSinceSync = Math.floor((Date.now() - lastSyncedAtRef.current) / 1000);
+      setDisplayElapsedTime((prev) => {
+        const projected = Math.min(requiredTimeSecs, lastSyncedElapsedRef.current + secondsSinceSync);
+        return projected >= prev ? projected : prev;
+      });
+    }, 250);
+
+    return () => clearInterval(timer);
+  }, [survey.isActive, requiredTimeSecs]);
+
+  const clampedElapsedTime = Math.min(displayElapsedTime, requiredTimeSecs);
 
   useEffect(() => {
     const percentage = requiredTimeSecs > 0
@@ -686,7 +723,9 @@ export const SurveyStatus: React.FC = () => {
   }, [survey.isActive, survey.currentAccuracy, clampedElapsedTime]);
 
   const displayAccuracy = !survey.isActive && lockedAccuracy.current > 0 ? lockedAccuracy.current : survey.currentAccuracy;
-  const finalDisplayTime = !survey.isActive && lockedTime.current > 0 ? lockedTime.current : clampedElapsedTime;
+  const finalDisplayTime = !survey.isActive && survey.status === 'completed'
+    ? requiredTimeSecs
+    : (!survey.isActive && lockedTime.current > 0 ? lockedTime.current : clampedElapsedTime);
 
   return (
     <div className="space-y-6">
