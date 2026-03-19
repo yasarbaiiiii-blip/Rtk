@@ -208,6 +208,7 @@ export const api = {
   },
 
   getAutoFlowConfig: async () => fetch(`${API_BASE}/api/v1/autoflow/config`).then(handleResponse),
+  getAutoFlowStatus: async () => fetch(`${API_BASE}/api/v1/autoflow/status`).then(handleResponse),
 
   enableAutoFlow: async (config: any) => {
     console.log(`📤 API Request [POST] ${API_BASE}/api/v1/autoflow/enable:`, config);
@@ -221,6 +222,23 @@ export const api = {
   disableAutoFlow: async () => {
     console.log(`📤 API Request [POST] ${API_BASE}/api/v1/autoflow/disable`);
     return fetch(`${API_BASE}/api/v1/autoflow/disable`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    }).then(handleResponse);
+  },
+
+  startAutoFlow: async (config: any) => {
+    console.log(`ðŸ“¤ API Request [POST] ${API_BASE}/api/v1/autoflow/start:`, config);
+    return fetch(`${API_BASE}/api/v1/autoflow/start`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(config),
+    }).then(handleResponse);
+  },
+
+  stopAutoFlow: async () => {
+    console.log(`ðŸ“¤ API Request [POST] ${API_BASE}/api/v1/autoflow/stop`);
+    return fetch(`${API_BASE}/api/v1/autoflow/stop`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
     }).then(handleResponse);

@@ -26,7 +26,10 @@ import {
   Download,
   Terminal,
   ChevronRight,
-  ChevronLeft
+  ChevronLeft,
+  Play,
+  Square,
+  X
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { uiLogger } from '../../utils/uiLogger';
@@ -132,7 +135,7 @@ const SectionCard: React.FC<{
 
 
 export const ConfigurationScreen: React.FC = () => {
-  const { configuration, updateConfiguration, survey, streams, gnssStatus, startNTRIP, stopNTRIP } = useGNSS();
+  const { configuration, updateConfiguration, survey, streams, gnssStatus, startNTRIP, stopNTRIP, isAutoFlowActive } = useGNSS();
   const [config, setConfig] = useState(configuration);
   const lastAppliedConfigRef = useRef(JSON.stringify(configuration));
   const [activeMsgType, setActiveMsgType] = useState<'MSM4' | 'MSM7'>('MSM4');
@@ -160,6 +163,8 @@ export const ConfigurationScreen: React.FC = () => {
   });
 
   const [isMobile, setIsMobile] = useState(false);
+  const [autoFlowPromptDismissed, setAutoFlowPromptDismissed] = useState(false);
+  const [autoFlowActionPending, setAutoFlowActionPending] = useState(false);
   
   // ⭐ FIX: Changed breakpoint to 768px. Tablets (like iPad) are typically 768px+. 
   // This ensures tablets get the full desktop grid view, and only phones get the clickable modal view.
@@ -198,6 +203,12 @@ export const ConfigurationScreen: React.FC = () => {
     });
   }, [configuration]);
 
+  useEffect(() => {
+    if (!config.baseStation.autoMode) {
+      setAutoFlowPromptDismissed(false);
+    }
+  }, [config.baseStation.autoMode]);
+
   const handleMsmTypeChange = async (type: 'MSM4' | 'MSM7') => {
     setActiveMsgType(type);
     try {
@@ -212,6 +223,17 @@ export const ConfigurationScreen: React.FC = () => {
     setRtcmHzRates(prev => ({ ...prev, [msgId]: hz }));
     toast.success(`Message ${msgId} set to ${hz} Hz`);
   };
+
+  const getAutoFlowPayload = () => ({
+    msm_type: activeMsgType,
+    min_duration_sec: config.baseStation.surveyDuration,
+    accuracy_limit_m: config.baseStation.accuracyThreshold / 100,
+    ntrip_host: config.streams.ntrip.server,
+    ntrip_port: config.streams.ntrip.port,
+    ntrip_mountpoint: config.streams.ntrip.mountpoint,
+    ntrip_password: config.streams.ntrip.password,
+    ntrip_username: config.streams.ntrip.username,
+  });
 
   const normalizeSavedConfig = (saved: any) => {
     const backendConfig = saved?.config ?? {};
@@ -254,16 +276,7 @@ export const ConfigurationScreen: React.FC = () => {
   const handleSave = async (): Promise<boolean> => {
     uiLogger.log('Save Configuration clicked', 'ConfigurationScreen', config);
     try {
-      const payload = {
-        msm_type: activeMsgType,
-        min_duration_sec: config.baseStation.surveyDuration,
-        accuracy_limit_m: config.baseStation.accuracyThreshold / 100,
-        ntrip_host: config.streams.ntrip.server,
-        ntrip_port: config.streams.ntrip.port,
-        ntrip_mountpoint: config.streams.ntrip.mountpoint,
-        ntrip_password: config.streams.ntrip.password,
-        ntrip_username: config.streams.ntrip.username,
-      };
+      const payload = getAutoFlowPayload();
 
       await api.enableAutoFlow(payload);
 
@@ -283,6 +296,34 @@ export const ConfigurationScreen: React.FC = () => {
     } catch (e) {
       toast.error(`Failed to save configuration: ${e}`);
       return false;
+    }
+  };
+
+  const handleStartAutoFlow = async () => {
+    setAutoFlowActionPending(true);
+    try {
+      await api.startAutoFlow(getAutoFlowPayload());
+      setAutoFlowPromptDismissed(false);
+      uiLogger.log('Auto Flow started manually', 'ConfigurationScreen');
+      toast.success('Auto Flow started');
+    } catch (e) {
+      toast.error(`Failed to start Auto Flow: ${e}`);
+    } finally {
+      setAutoFlowActionPending(false);
+    }
+  };
+
+  const handleStopAutoFlow = async () => {
+    setAutoFlowActionPending(true);
+    try {
+      await api.stopAutoFlow();
+      setAutoFlowPromptDismissed(false);
+      uiLogger.log('Auto Flow stopped manually', 'ConfigurationScreen');
+      toast.success('Auto Flow stopped');
+    } catch (e) {
+      toast.error(`Failed to stop Auto Flow: ${e}`);
+    } finally {
+      setAutoFlowActionPending(false);
     }
   };
 
@@ -422,6 +463,64 @@ export const ConfigurationScreen: React.FC = () => {
                   onCheckedChange={(checked) => setConfig({ ...config, baseStation: { ...config.baseStation, autoMode: checked } })}
                 />
               </div>
+
+              {config.baseStation.autoMode && (
+                <div className={`${boxClasses} space-y-4`}>
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <Label className="text-sm font-semibold text-slate-900 dark:text-slate-100">Immediate Auto Flow Control</Label>
+                      <p className="text-[11px] font-medium text-slate-500 dark:text-slate-400 mt-0.5">
+                        Start Auto Flow now without restarting the backend, or skip and leave it ready for boot/startup.
+                      </p>
+                    </div>
+                    <Badge
+                      variant="outline"
+                      className={`px-2.5 py-1 rounded-md font-semibold text-[10px] uppercase tracking-wider ${
+                        isAutoFlowActive
+                          ? 'border-emerald-200 dark:border-emerald-800 text-emerald-700 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-900/10'
+                          : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 bg-white dark:bg-slate-900'
+                      }`}
+                    >
+                      {isAutoFlowActive ? 'Running' : 'Ready'}
+                    </Badge>
+                  </div>
+
+                  {isAutoFlowActive ? (
+                    <Button
+                      type="button"
+                      variant="destructive"
+                      onClick={handleStopAutoFlow}
+                      disabled={autoFlowActionPending}
+                      className="w-full h-11 rounded-lg text-sm font-semibold tracking-wide transition-transform active:scale-95 shadow-sm"
+                    >
+                      <Square className="size-4 mr-2" />
+                      Stop Auto Flow
+                    </Button>
+                  ) : !autoFlowPromptDismissed ? (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <Button
+                        type="button"
+                        onClick={handleStartAutoFlow}
+                        disabled={autoFlowActionPending}
+                        className="h-11 rounded-lg text-sm font-semibold tracking-wide transition-transform active:scale-95 bg-blue-600 hover:bg-blue-700 text-white shadow-sm"
+                      >
+                        <Play className="size-4 mr-2" />
+                        Start Auto Flow
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        onClick={() => setAutoFlowPromptDismissed(true)}
+                        disabled={autoFlowActionPending}
+                        className="h-11 rounded-lg text-sm font-semibold tracking-wide transition-transform active:scale-95 border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300"
+                      >
+                        <X className="size-4 mr-2" />
+                        Skip
+                      </Button>
+                    </div>
+                  ) : null}
+                </div>
+              )}
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 {/* Duration */}

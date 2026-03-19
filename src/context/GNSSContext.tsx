@@ -511,6 +511,27 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return () => clearInterval(interval);
   }, [syncConfigurationFromBackend]);
 
+  useEffect(() => {
+    const syncAutoFlowStatus = () => {
+      if (!connection.isConnected) {
+        setIsAutoFlowActive(false);
+        return;
+      }
+
+      api.getAutoFlowStatus()
+        .then((status) => {
+          const stage = typeof status.stage === 'string' ? status.stage.toLowerCase() : '';
+          const isRunningStage = !['', 'idle', 'disabled', 'stopped', 'completed', 'complete'].includes(stage);
+          setIsAutoFlowActive(Boolean(status.enabled) && isRunningStage);
+        })
+        .catch(() => { });
+    };
+
+    syncAutoFlowStatus();
+    const interval = setInterval(syncAutoFlowStatus, 2000);
+    return () => clearInterval(interval);
+  }, [connection.isConnected]);
+
   const addLog = useCallback((level: 'error' | 'warning' | 'info', message: string) => {
     setLogs((prev) => [{ id: Date.now().toString() + Math.random(), timestamp: new Date(), level, message }, ...prev].slice(0, 500));
   }, []);
