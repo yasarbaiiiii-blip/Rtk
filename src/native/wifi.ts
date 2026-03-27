@@ -7,6 +7,11 @@ export interface NativeWifiNetwork {
   secured: boolean;
 }
 
+export interface CurrentWifiInfo {
+  ssid: string;
+  ip: string;
+}
+
 async function ensureWifiPermission() {
   if (!Capacitor.isNativePlatform()) return;
 
@@ -40,6 +45,31 @@ export async function scanWifi(): Promise<NativeWifiNetwork[]> {
         n.security !== "OPEN" &&
         n.capabilities !== "[]",
     }));
+}
+
+export async function getCurrentWifiInfo(): Promise<CurrentWifiInfo | null> {
+  if (!Capacitor.isNativePlatform()) return null;
+
+  await ensureWifiPermission();
+
+  try {
+    const info = await CapacitorWifi.getWifiInfo();
+    return {
+      ssid: info?.ssid ?? "",
+      ip: info?.ip ?? "",
+    };
+  } catch {
+    try {
+      const ipResult = await CapacitorWifi.getIpAddress();
+      const ssidResult = await CapacitorWifi.getSsid();
+      return {
+        ssid: ssidResult?.ssid ?? "",
+        ip: ipResult?.ipAddress ?? "",
+      };
+    } catch {
+      return null;
+    }
+  }
 }
 
 export async function connectWifi(

@@ -6,7 +6,7 @@
  * Can be integrated into React components for debugging
  */
 
-import { api, WS_URL } from "../api/gnssApi";
+import { api, getWsUrl } from "../api/gnssApiDynamic";
 
 export interface BackendLog {
   id: string;
@@ -125,12 +125,18 @@ class BackendLogger {
    */
   async connectWebSocket(): Promise<void> {
     return new Promise((resolve, reject) => {
+      const wsUrl = getWsUrl();
       try {
-        this.wsRef = new WebSocket(WS_URL);
+        if (!wsUrl) {
+          resolve();
+          return;
+        }
+
+        this.wsRef = new WebSocket(wsUrl);
 
         this.wsRef.onopen = () => {
           this.addLog("WEBSOCKET_EVENT", {
-            endpoint: WS_URL,
+            endpoint: wsUrl,
             data: {
               event: "connected",
               timestamp: new Date().toISOString(),
@@ -143,7 +149,7 @@ class BackendLogger {
           try {
             const data = JSON.parse(event.data);
             this.addLog("WEBSOCKET_EVENT", {
-              endpoint: WS_URL,
+              endpoint: wsUrl,
               data: {
                 event: "message",
                 message: data,
@@ -151,7 +157,7 @@ class BackendLogger {
             });
           } catch (error) {
             this.addLog("API_ERROR", {
-              endpoint: WS_URL,
+              endpoint: wsUrl,
               error: `Failed to parse WebSocket message: ${error}`,
             });
           }
@@ -159,7 +165,7 @@ class BackendLogger {
 
         this.wsRef.onerror = (error) => {
           this.addLog("API_ERROR", {
-            endpoint: WS_URL,
+            endpoint: wsUrl,
             error: `WebSocket error: ${error}`,
           });
           reject(error);
@@ -167,7 +173,7 @@ class BackendLogger {
 
         this.wsRef.onclose = () => {
           this.addLog("WEBSOCKET_EVENT", {
-            endpoint: WS_URL,
+            endpoint: wsUrl,
             data: {
               event: "disconnected",
               timestamp: new Date().toISOString(),
@@ -176,7 +182,7 @@ class BackendLogger {
         };
       } catch (error) {
         this.addLog("API_ERROR", {
-          endpoint: WS_URL,
+          endpoint: wsUrl,
           error: `WebSocket connection failed: ${error}`,
         });
         reject(error);
@@ -188,10 +194,11 @@ class BackendLogger {
    * Close WebSocket connection
    */
   disconnectWebSocket() {
+    const wsUrl = getWsUrl();
     if (this.wsRef) {
       this.wsRef.close();
       this.addLog("WEBSOCKET_EVENT", {
-        endpoint: WS_URL,
+        endpoint: wsUrl ?? undefined,
         data: { event: "manual_disconnect" },
       });
     }

@@ -1,28 +1,28 @@
 import React, { useState, useEffect } from 'react';
-import { Capacitor } from "@capacitor/core";
 import { useGNSS } from '../../context/GNSSContext';
 import { Button } from './ui/button';
-import { Card, CardContent } from './ui/card';
+import { Card } from './ui/card';
 import { Input } from './ui/input';
-import { Label } from './ui/label';
 import { Badge } from './ui/badge';
 import { 
-  Wifi, Bluetooth, RotateCw, Cpu, 
+  RotateCw, Cpu, 
   ChevronRight, Orbit, Lightbulb, Radar, 
   SearchCode, Terminal, Waves, ShieldCheck, Edit2
 } from 'lucide-react';
 import { toast } from 'sonner';
-import { WS_URL } from '../../api/gnssApi';
+import { getWsUrl } from '../../api/gnssApiDynamic';
 import { deepSweepNetwork } from '../../utils/ipDiscovery';
+import { getCurrentWifiInfo } from '../../native/wifi';
 
 export const ConnectionScreen: React.FC = () => {
-  const { availableBLEDevices, connectToDevice, scanBLE, logs } = useGNSS();
-  const [connectionMode, setConnectionMode] = useState<'wifi' | 'ble' | 'auto'>('wifi');
+  const { connectToDevice, logs } = useGNSS();
+  const [connectionMode, setConnectionMode] = useState<'wifi' | 'auto'>('wifi');
   
   // WebSocket Scanner States
   const [availableSockets, setAvailableSockets] = useState<{id: string, name: string, ip: string, url: string}[]>([]);
   const [selectedSocket, setSelectedSocket] = useState<string>('');
   const [customIp, setCustomIp] = useState<string>(''); 
+  const [currentWifiName, setCurrentWifiName] = useState<string>('');
   
   const [isConnecting, setIsConnecting] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
@@ -37,10 +37,14 @@ export const ConnectionScreen: React.FC = () => {
   // ⭐ NEW SMART PARSER: Accurately extracts the correct Port and Path from your API setup
   const getWsConfig = () => {
     let port = '8000'; // Default to 8000 since we know your backend uses it
-    let path = '/ws';  // Common FastAPI websocket path fallback
+    let path = '/ws/status';
     try { 
-      // If WS_URL is "ws://192.168.1.55:8000/ws", this pulls out "8000" and "/ws"
-      const parsed = new URL(WS_URL);
+      const currentWsUrl = getWsUrl();
+      if (!currentWsUrl) {
+        return { port, path };
+      }
+
+      const parsed = new URL(currentWsUrl);
       port = parsed.port || '8000';
       path = parsed.pathname !== '/' ? parsed.pathname : '';
     } catch(e) {}
@@ -53,8 +57,11 @@ export const ConnectionScreen: React.FC = () => {
     setSelectedSocket('');
     setAvailableSockets([]);
     
+    const wifiInfo = await getCurrentWifiInfo();
+    setCurrentWifiName(wifiInfo?.ssid ?? '');
+
     const { port, path } = getWsConfig();
-    const foundWs = await deepSweepNetwork();
+    const foundWs = await deepSweepNetwork(wifiInfo?.ip);
 
     if (foundWs) {
       const parsed = new URL(foundWs);
@@ -73,7 +80,7 @@ export const ConnectionScreen: React.FC = () => {
     setIsScanning(false);
   };
 
-  const handleConnect = async (type: 'wifi' | 'ble' | 'auto', identifier: string, wsUrl?: string) => {
+  const handleConnect = async (type: 'wifi' | 'auto', identifier: string, wsUrl?: string) => {
     if (!identifier && !wsUrl) {
       toast.error('Target node required');
       return;
@@ -106,15 +113,6 @@ export const ConnectionScreen: React.FC = () => {
     await handleConnect('auto', 'CURRENT_WIFI');
   };
 
-  const handleScan = async (type: 'wifi' | 'ble') => {
-    if (type === 'wifi') {
-       await scanLocalSockets();
-    } else {
-       setIsScanning(true);
-       await scanBLE();
-       setTimeout(() => setIsScanning(false), 2000);
-    }
-  };
 
   // ⭐ Make Manual Entry perfectly format the URL based on your backend
   const getCustomWsUrl = () => {
@@ -136,7 +134,8 @@ export const ConnectionScreen: React.FC = () => {
   const getSmartSuggestion = () => {
     if (isConnecting) return "Establishing secure bridge...";
     if (scanPhase === 'deep') return "Deep sweep active. Searching full router subnet...";
-    if (connectionMode === 'auto') return "Searching for GNSS hardware nodes.";
+    if (connectionMode === 'auto') return "Reconnect using your saved GNSS backend.";
+    if (currentWifiName) return `Scanning ${currentWifiName} for GNSS hardware.`;
     return "Select a node to begin handshake.";
   };
 
@@ -182,8 +181,7 @@ export const ConnectionScreen: React.FC = () => {
           <span className={techLabel}>Layer Selection</span>
           {[
             { id: 'auto', icon: Radar, label: 'Autonomous', desc: 'Smart Discovery' },
-            { id: 'wifi', icon: Terminal, label: 'WLAN Socket', desc: 'Local Network Scan' },
-            { id: 'ble', icon: Bluetooth, label: 'Direct BLE', desc: 'Proximity Bridge' }
+            { id: 'wifi', icon: Terminal, label: 'WLAN Socket', desc: 'Local Network Scan' }
           ].map((m) => (
             <button
               key={m.id}
@@ -347,27 +345,6 @@ export const ConnectionScreen: React.FC = () => {
                 </div>
               )}
 
-              {connectionMode === 'ble' && (
-                <div className="space-y-3 animate-in slide-in-from-right-8 duration-500">
-                  {availableBLEDevices.length === 0 && (
-                    <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-xs font-medium text-slate-600 dark:border-slate-800 dark:bg-slate-950/40 dark:text-slate-300">
-                      No BLE devices yet. Tap scan to discover nearby receivers.
-                    </div>
-                  )}
-                  {availableBLEDevices.map((d) => (
-                    <div key={d.id} onClick={() => handleConnect('ble', d.id)} className="flex items-center justify-between p-5 rounded-[2rem] border border-slate-100 dark:border-slate-800 bg-white/40 dark:bg-slate-950/20 hover:border-blue-500 transition-all cursor-pointer active:scale-95">
-                      <div className="flex items-center gap-5">
-                        <div className="p-3.5 rounded-2xl bg-blue-500/10 text-blue-500 border border-blue-500/10"><Bluetooth size={20} /></div>
-                        <div>
-                          <h4 className="text-sm font-semibold dark:text-slate-100">{d.name || 'Station_Node'}</h4>
-                          <p className="text-[9px] font-light font-mono text-slate-400 uppercase tracking-widest mt-1">ID: {d.mac}</p>
-                        </div>
-                      </div>
-                      <Badge className="bg-slate-100 dark:bg-slate-800 text-slate-500 border-none font-mono text-[10px] h-6 px-3">{d.rssi}dBm</Badge>
-                    </div>
-                  ))}
-                </div>
-              )}
             </div>
 
             <div className="p-6 bg-slate-50 dark:bg-slate-950/40 border-t border-slate-200 dark:border-slate-800 flex items-center justify-center gap-12">
@@ -422,8 +399,7 @@ export const ConnectionScreen: React.FC = () => {
            <div className="bg-slate-900/90 dark:bg-slate-900/95 backdrop-blur-2xl border border-white/10 p-2 rounded-[2.5rem] shadow-2xl flex items-center justify-between gap-2 ring-1 ring-white/20">
               {[
                 { id: 'auto', icon: Radar, label: 'AUTO' },
-                { id: 'wifi', icon: Terminal, label: 'SOCKET' },
-                { id: 'ble', icon: Bluetooth, label: 'BLE' }
+                { id: 'wifi', icon: Terminal, label: 'SOCKET' }
               ].map((m) => (
                 <button
                   key={m.id}

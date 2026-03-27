@@ -33,7 +33,7 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { uiLogger } from '../../utils/uiLogger';
-import { api } from '../../api/gnssApi';
+import { api } from '../../api/gnssApiDynamic';
 
 /* ── Custom Responsive Section Wrapper (Native Mobile Feel with Perfect Dark Mode) ── */
 const SectionCard: React.FC<{
@@ -275,28 +275,39 @@ export const ConfigurationScreen: React.FC = () => {
 
   const handleSave = async (): Promise<boolean> => {
     uiLogger.log('Save Configuration clicked', 'ConfigurationScreen', config);
-    try {
-      const payload = getAutoFlowPayload();
+    const payload = getAutoFlowPayload();
 
-      await api.enableAutoFlow(payload);
-
-      if (!config.baseStation.autoMode) {
-        await api.disableAutoFlow();
+    // Fire off backend saves asynchronously so UI doesn't freeze for 5+ seconds
+    (async () => {
+      try {
+        if (api.saveAutoFlowConfig) {
+          await api.saveAutoFlowConfig(payload);
+        } else {
+          throw new Error("No save endpoint");
+        }
+      } catch (e) {
+        console.warn('Fallback: saveAutoFlowConfig failed, using enableAutoFlow', e);
       }
 
-      const savedConfig = await api.getAutoFlowConfig();
-      const nextConfig = normalizeSavedConfig(savedConfig);
+      if (config.baseStation.autoMode) {
+        await api.enableAutoFlow(payload).catch(() => {});
+      } else {
+        await api.disableAutoFlow().catch(() => {});
+      }
+    })();
 
-      lastAppliedConfigRef.current = JSON.stringify(nextConfig);
-      setConfig(nextConfig);
-      updateConfiguration(nextConfig);
-      uiLogger.log('Configuration saved', 'ConfigurationScreen');
-      toast.success('Configuration saved successfully');
-      return true;
-    } catch (e) {
-      toast.error(`Failed to save configuration: ${e}`);
-      return false;
-    }
+    setAutoFlowPromptDismissed(false);
+
+    // Apply config locally instantly for snappy UI
+    lastAppliedConfigRef.current = JSON.stringify(config);
+    updateConfiguration(config);
+    uiLogger.log('Configuration saved', 'ConfigurationScreen');
+    toast.success(
+      config.baseStation.autoMode
+        ? 'Auto Flow profile enabled. Start it manually when needed.'
+        : 'Configuration saved successfully'
+    );
+    return true;
   };
 
   const handleStartAutoFlow = async () => {
@@ -450,11 +461,12 @@ export const ConfigurationScreen: React.FC = () => {
         <div className="space-y-4 md:space-y-6 flex flex-col">
 
           <SectionCard title="Base Station Positioning" description="Configure Survey-In constraints and operation modes" icon={Target} isMobile={isMobile} handleSave={handleSave}>
+              {/*
               <div className="flex items-center justify-between p-4 md:p-5 rounded-xl bg-slate-50 dark:bg-slate-950/50 border border-slate-200 dark:border-slate-800/80 shadow-sm transition-colors">
                 <div className="pr-3">
-                  <Label htmlFor="auto-mode" className="text-sm font-semibold text-slate-900 dark:text-slate-100 cursor-pointer">Automatic Flow Mode</Label>
+                  <Label htmlFor="auto-mode" className="text-sm font-semibold text-slate-900 dark:text-slate-100 cursor-pointer">Automatic Flow Profile</Label>
                   <p className="text-[11px] font-medium text-slate-500 dark:text-slate-400 mt-0.5">
-                    Start survey automatically. Auto-switches to NTRIP cast when target accuracy is reached.
+                    Save an Auto Flow profile for this backend. The flow stays idle until the operator starts it manually.
                   </p>
                 </div>
                 <Switch
@@ -465,62 +477,110 @@ export const ConfigurationScreen: React.FC = () => {
               </div>
 
               {config.baseStation.autoMode && (
-                <div className={`${boxClasses} space-y-4`}>
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <Label className="text-sm font-semibold text-slate-900 dark:text-slate-100">Immediate Auto Flow Control</Label>
-                      <p className="text-[11px] font-medium text-slate-500 dark:text-slate-400 mt-0.5">
-                        Start Auto Flow now without restarting the backend, or skip and leave it ready for boot/startup.
+                <div className="relative overflow-hidden rounded-2xl border border-blue-200/70 dark:border-blue-900/40 bg-gradient-to-br from-blue-50 via-white to-slate-50 dark:from-blue-950/20 dark:via-slate-900 dark:to-slate-950 shadow-sm">
+                  <div className="absolute inset-x-0 top-0 h-1 bg-gradient-to-r from-blue-500 via-cyan-400 to-emerald-400" />
+                  <div className="p-5 md:p-6 space-y-5">
+                    <div className="flex items-start justify-between gap-4">
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2.5">
+                          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-blue-600 text-white shadow-sm">
+                            <Play className="size-4" />
+                          </div>
+                          <div>
+                            <Label className="text-base font-semibold text-slate-900 dark:text-slate-100">Auto Flow Console</Label>
+                            <p className="text-[11px] font-medium text-slate-500 dark:text-slate-400 mt-0.5">
+                              Manual launch control for the saved Auto Flow profile.
+                            </p>
+                          </div>
+                        </div>
+                        <p className="text-xs font-medium text-slate-600 dark:text-slate-300 pl-[3.25rem]">
+                          Saving this profile does not start the flow. The operator must choose to start it.
+                        </p>
+                      </div>
+                      <Badge
+                        variant="outline"
+                        className={`px-2.5 py-1 rounded-md font-semibold text-[10px] uppercase tracking-wider shrink-0 ${
+                          isAutoFlowActive
+                            ? 'border-emerald-200 dark:border-emerald-800 text-emerald-700 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-900/10'
+                            : 'border-blue-200 dark:border-blue-800 text-blue-700 dark:text-blue-300 bg-white/80 dark:bg-slate-900/80'
+                        }`}
+                      >
+                        {isAutoFlowActive ? 'Running' : 'Idle'}
+                      </Badge>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                      <div className="rounded-xl border border-slate-200 dark:border-slate-800/80 bg-white/80 dark:bg-slate-950/60 p-4 shadow-sm">
+                        <div className="text-[10px] font-semibold uppercase tracking-widest text-slate-500 dark:text-slate-400 mb-1">Profile</div>
+                        <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                          {activeMsgType} / {config.baseStation.surveyDuration}s
+                        </div>
+                      </div>
+                      <div className="rounded-xl border border-slate-200 dark:border-slate-800/80 bg-white/80 dark:bg-slate-950/60 p-4 shadow-sm">
+                        <div className="text-[10px] font-semibold uppercase tracking-widest text-slate-500 dark:text-slate-400 mb-1">Target</div>
+                        <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                          {config.baseStation.accuracyThreshold} cm
+                        </div>
+                      </div>
+                      <div className="rounded-xl border border-slate-200 dark:border-slate-800/80 bg-white/80 dark:bg-slate-950/60 p-4 shadow-sm">
+                        <div className="text-[10px] font-semibold uppercase tracking-widest text-slate-500 dark:text-slate-400 mb-1">Mountpoint</div>
+                        <div className="text-sm font-semibold text-slate-900 dark:text-slate-100 truncate">
+                          {config.streams.ntrip.mountpoint || 'Not set'}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="rounded-xl border border-dashed border-slate-300 dark:border-slate-700 bg-white/70 dark:bg-slate-950/40 p-4">
+                      <div className="text-[10px] font-semibold uppercase tracking-widest text-slate-500 dark:text-slate-400 mb-1">
+                        Operator Decision
+                      </div>
+                      <p className="text-sm font-medium text-slate-700 dark:text-slate-300">
+                        {isAutoFlowActive
+                          ? 'Auto Flow is currently running on the backend.'
+                          : autoFlowPromptDismissed
+                          ? 'Auto Flow is armed and waiting. Start it whenever the operator is ready.'
+                          : 'Choose whether to start Auto Flow now or keep it armed for later.'}
                       </p>
                     </div>
-                    <Badge
-                      variant="outline"
-                      className={`px-2.5 py-1 rounded-md font-semibold text-[10px] uppercase tracking-wider ${
-                        isAutoFlowActive
-                          ? 'border-emerald-200 dark:border-emerald-800 text-emerald-700 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-900/10'
-                          : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 bg-white dark:bg-slate-900'
-                      }`}
-                    >
-                      {isAutoFlowActive ? 'Running' : 'Ready'}
-                    </Badge>
-                  </div>
 
-                  {isAutoFlowActive ? (
-                    <Button
-                      type="button"
-                      variant="destructive"
-                      onClick={handleStopAutoFlow}
-                      disabled={autoFlowActionPending}
-                      className="w-full h-11 rounded-lg text-sm font-semibold tracking-wide transition-transform active:scale-95 shadow-sm"
-                    >
-                      <Square className="size-4 mr-2" />
-                      Stop Auto Flow
-                    </Button>
-                  ) : !autoFlowPromptDismissed ? (
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    {isAutoFlowActive ? (
                       <Button
                         type="button"
-                        onClick={handleStartAutoFlow}
+                        variant="destructive"
+                        onClick={handleStopAutoFlow}
                         disabled={autoFlowActionPending}
-                        className="h-11 rounded-lg text-sm font-semibold tracking-wide transition-transform active:scale-95 bg-blue-600 hover:bg-blue-700 text-white shadow-sm"
+                        className="w-full h-11 rounded-lg text-sm font-semibold tracking-wide transition-transform active:scale-95 shadow-sm"
                       >
-                        <Play className="size-4 mr-2" />
-                        Start Auto Flow
+                        <Square className="size-4 mr-2" />
+                        Stop Auto Flow
                       </Button>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        onClick={() => setAutoFlowPromptDismissed(true)}
-                        disabled={autoFlowActionPending}
-                        className="h-11 rounded-lg text-sm font-semibold tracking-wide transition-transform active:scale-95 border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300"
-                      >
-                        <X className="size-4 mr-2" />
-                        Skip
-                      </Button>
-                    </div>
-                  ) : null}
+                    ) : (
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <Button
+                          type="button"
+                          onClick={handleStartAutoFlow}
+                          disabled={autoFlowActionPending}
+                          className="h-11 rounded-lg text-sm font-semibold tracking-wide transition-transform active:scale-95 bg-blue-600 hover:bg-blue-700 text-white shadow-sm"
+                        >
+                          <Play className="size-4 mr-2" />
+                          Start Auto Flow
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          onClick={() => setAutoFlowPromptDismissed(true)}
+                          disabled={autoFlowActionPending}
+                          className="h-11 rounded-lg text-sm font-semibold tracking-wide transition-transform active:scale-95 border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300"
+                        >
+                          <X className="size-4 mr-2" />
+                          {autoFlowPromptDismissed ? 'Skipped For Now' : 'Skip For Now'}
+                        </Button>
+                      </div>
+                    )}
+                  </div>
                 </div>
               )}
+              */}
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 {/* Duration */}
