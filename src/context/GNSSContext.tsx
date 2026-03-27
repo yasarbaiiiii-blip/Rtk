@@ -22,7 +22,7 @@ import {
   Satellite,
 } from "../types/gnss";
 
-import { api, WS_URL, setApiHost } from "../api/gnssApi";
+import { api, getApiHost, getWsUrl, setApiHost } from "../api/gnssApiDynamic";
 import { scanWifi, connectWifi } from "../native/wifi";
 import { connectBle, scanBleDevices } from "../native/ble";
 import { uiLogger } from "../utils/uiLogger";
@@ -75,13 +75,16 @@ export const useGNSS = () => {
 
 export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const wsRef = useRef<WebSocket | null>(null);
-  const activeWsUrlRef = useRef<string>(WS_URL);
+  const activeWsUrlRef = useRef<string | null>(null);
   const stoppingRef = useRef(false);
   const intentionalDisconnectRef = useRef(false);
   const startPendingRef = useRef(false);
   const startInitiatedAtRef = useRef(0);
   const inactiveSurveyReportsRef = useRef(0);
   const lastSurveyActiveAtRef = useRef(0);
+  const hasSeenActiveRef = useRef(false);
+  const startupPollLogCountRef = useRef(0);
+  const startupWsLogCountRef = useRef(0);
   const START_PENDING_GRACE_MS = 3500;
   const STORAGE_KEYS = {
     connection: 'gnss_connection',
@@ -245,6 +248,26 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const [configuration, setConfiguration] = useState<Configuration>(loadPersistedConfig);
   const [settings, setSettings] = useState<AppSettings>(loadPersistedSettings);
+
+  const preserveCount = (incoming: unknown, previous: number) => {
+    const next = Number(incoming);
+    if (!Number.isFinite(next)) return previous;
+    if (next === 0 && previous > 0) return previous;
+    return next;
+  };
+
+  const preserveCoordinate = (incoming: unknown, previous: number) => {
+    const next = Number(incoming);
+    if (!Number.isFinite(next)) return previous;
+    if (next === 0 && previous !== 0) return previous;
+    return next;
+  };
+
+  const preserveOptionalNumber = (incoming: unknown, previous: number | null) => {
+    const next = Number(incoming);
+    if (!Number.isFinite(next)) return previous;
+    return next;
+  };
 
   const persistConfiguration = useCallback((config: Configuration) => {
     try {
@@ -555,15 +578,22 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const connectWebSocket = useCallback((customUrl?: string) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
-    
-    if (customUrl) {
-      activeWsUrlRef.current = customUrl;
-      setApiHost(customUrl);
+
+    const nextWsUrl = customUrl ?? activeWsUrlRef.current ?? lastSavedWsUrl;
+    if (!nextWsUrl) {
+      addLog('error', 'No WebSocket URL available for connection');
+      return;
     }
 
-    wsRef.current = new WebSocket(activeWsUrlRef.current);
+    activeWsUrlRef.current = nextWsUrl;
+    setApiHost(nextWsUrl);
+    addLog('info', `Connecting WebSocket to ${nextWsUrl}`);
+    addLog('info', `Resolved API host ${getApiHost() ?? 'unavailable'}`);
+
+    wsRef.current = new WebSocket(nextWsUrl);
 
     wsRef.current.onopen = () => {
+      const connectedWsUrl = activeWsUrlRef.current;
       setConnection((prev) => ({ ...prev, isConnected: true, lastConnectedTimestamp: new Date() }));
       addLog('info', 'WebSocket connected');
       void api.getAutoFlowConfig()
@@ -574,9 +604,11 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
       // ⭐ MEMORY STORAGE RULE: The moment connection is successful, securely write the IP to memory
       try {
-        localStorage.setItem(STORAGE_KEYS.lastWs, activeWsUrlRef.current);
-        setLastSavedWsUrl(activeWsUrlRef.current);
-        console.log(`💾 Saved successful connection: ${activeWsUrlRef.current}`);
+        if (connectedWsUrl) {
+          localStorage.setItem(STORAGE_KEYS.lastWs, connectedWsUrl);
+          setLastSavedWsUrl(connectedWsUrl);
+          console.log(`Saved successful connection: ${connectedWsUrl}`);
+        }
       } catch (e) {
         console.warn('Failed to save WS URL:', e);
       }
@@ -591,26 +623,42 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
           (_, i) => ({ id: i, constellation: "GPS", elevation: 0, azimuth: 0, snr: 0, used: true })
         );
 
-        setGNSSStatus({
-          satellites,
-          fixType: data.gnss?.fix_type ?? "none",
-          dop: { hdop: data.gnss?.hdop ?? null, vdop: data.gnss?.vdop ?? null, pdop: data.gnss?.pdop ?? null },
-          updateRate: data.gnss?.update_rate_hz ?? 1,
-          lastUpdate: new Date(),
-          firmwareVersion: data.system?.firmware_version ?? "unknown",
-          activeConstellations: ["GPS"],
-          globalPosition: {
-            latitude: data.gnss?.latitude ?? 0,
-            longitude: data.gnss?.longitude ?? 0,
-            altitude: data.gnss?.altitude_msl ?? 0,
-            horizontalAccuracy: data.gnss?.horizontal_accuracy ?? 0,
+        setGNSSStatus((prev) => ({
+          satellites: Number.isFinite(Number(data.gnss?.num_satellites))
+            ? satellites
+            : prev.satellites,
+          fixType: data.gnss?.fix_type ?? prev.fixType,
+          dop: {
+            hdop: preserveOptionalNumber(data.gnss?.hdop, prev.dop.hdop),
+            vdop: preserveOptionalNumber(data.gnss?.vdop, prev.dop.vdop),
+            pdop: preserveOptionalNumber(data.gnss?.pdop, prev.dop.pdop),
           },
-        });
+          updateRate: Number.isFinite(Number(data.gnss?.update_rate_hz))
+            ? Number(data.gnss?.update_rate_hz)
+            : prev.updateRate,
+          lastUpdate: new Date(),
+          firmwareVersion: data.system?.firmware_version ?? prev.firmwareVersion,
+          activeConstellations: prev.activeConstellations.length > 0 ? prev.activeConstellations : ["GPS"],
+          globalPosition: {
+            latitude: preserveCoordinate(data.gnss?.latitude, prev.globalPosition.latitude),
+            longitude: preserveCoordinate(data.gnss?.longitude, prev.globalPosition.longitude),
+            altitude: preserveCoordinate(data.gnss?.altitude_msl, prev.globalPosition.altitude),
+            horizontalAccuracy: preserveCount(data.gnss?.horizontal_accuracy, prev.globalPosition.horizontalAccuracy),
+          },
+        }));
 
         syncConfigurationFromBackend(data);
 
         if (data.autoflow !== undefined) {
           setIsAutoFlowActive(data.autoflow.active ?? false);
+        }
+
+        if (startPendingRef.current && startupWsLogCountRef.current < 8) {
+          startupWsLogCountRef.current += 1;
+          addLog(
+            'info',
+            `WS survey update ${startupWsLogCountRef.current}: active=${String(data.survey?.active ?? false)}, progress=${String(data.survey?.progress_seconds ?? 'null')}, accuracy_m=${String(data.survey?.accuracy_m ?? 'null')}`
+          );
         }
 
         setSurvey((prev) => {
@@ -626,16 +674,20 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
           const pos = data.survey?.position || data.survey?.local_position || {};
           
           const wsLocalCoords = {
-            meanX: parseVal(data.survey?.mean_x_m ?? data.survey?.meanX ?? data.survey?.ecef_x ?? data.survey?.x ?? pos.x ?? pos[0]) ?? prev.localCoordinates.meanX,
-            meanY: parseVal(data.survey?.mean_y_m ?? data.survey?.meanY ?? data.survey?.ecef_y ?? data.survey?.y ?? pos.y ?? pos[1]) ?? prev.localCoordinates.meanY,
-            meanZ: parseVal(data.survey?.mean_z_m ?? data.survey?.meanZ ?? data.survey?.ecef_z ?? data.survey?.z ?? pos.z ?? pos[2]) ?? prev.localCoordinates.meanZ,
-            observations: data.survey?.observations ?? prev.localCoordinates.observations,
+            meanX: preserveCoordinate(parseVal(data.survey?.mean_x_m ?? data.survey?.meanX ?? data.survey?.ecef_x ?? data.survey?.x ?? pos.x ?? pos[0]), prev.localCoordinates.meanX),
+            meanY: preserveCoordinate(parseVal(data.survey?.mean_y_m ?? data.survey?.meanY ?? data.survey?.ecef_y ?? data.survey?.y ?? pos.y ?? pos[1]), prev.localCoordinates.meanY),
+            meanZ: preserveCoordinate(parseVal(data.survey?.mean_z_m ?? data.survey?.meanZ ?? data.survey?.ecef_z ?? data.survey?.z ?? pos.z ?? pos[2]), prev.localCoordinates.meanZ),
+            observations: preserveCount(data.survey?.observations, prev.localCoordinates.observations),
           };
           const withinStartGrace =
             startPendingRef.current &&
-            prev.isActive &&
+            (prev.isActive || prev.status === "initializing") &&
             !wsActive &&
             (Date.now() - startInitiatedAtRef.current) < START_PENDING_GRACE_MS;
+
+          if (wsActive) {
+            hasSeenActiveRef.current = true;
+          }
 
           if (wsActive && !prev.isActive) {
             startPendingRef.current = false;
@@ -647,8 +699,9 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
               status: "in-progress",
               elapsedTime: wsElapsed,
               currentAccuracy: wsAccuracy,
-              satelliteCount: data.gnss?.num_satellites ?? 0,
+              satelliteCount: preserveCount(data.gnss?.num_satellites, prev.satelliteCount),
               localCoordinates: wsLocalCoords,
+              valid: wsValid,
             };
           }
 
@@ -660,17 +713,16 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
             }
             const shouldUpdateAccuracy = wsAccuracy > 0 && wsAccuracy < 5000;
             const shouldTreatInactiveAsFinal =
+              hasSeenActiveRef.current &&
               !wsActive &&
               (
                 wsValid ||
-                wsElapsed >= prev.requiredTime ||
-                (wsAccuracy > 0 && wsAccuracy <= prev.targetAccuracy)
+                (wsElapsed > 0 && wsElapsed >= prev.requiredTime)
               );
             if (withinStartGrace) {
               return {
                 ...prev,
-                elapsedTime: nextActiveElapsed,
-                satelliteCount: data.gnss?.num_satellites ?? prev.satelliteCount,
+                satelliteCount: preserveCount(data.gnss?.num_satellites, prev.satelliteCount),
                 currentAccuracy: shouldUpdateAccuracy ? wsAccuracy : prev.currentAccuracy,
                 position: {
                   latitude: data.gnss?.latitude ?? prev.position.latitude,
@@ -679,6 +731,24 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
                   accuracy: data.gnss?.horizontal_accuracy ?? prev.position.accuracy,
                 },
                 localCoordinates: wsLocalCoords,
+                valid: wsValid || prev.valid,
+              };
+            }
+
+            if (startPendingRef.current && !hasSeenActiveRef.current && !wsActive) {
+              return {
+                ...prev,
+                status: "initializing",
+                satelliteCount: preserveCount(data.gnss?.num_satellites, prev.satelliteCount),
+                currentAccuracy: shouldUpdateAccuracy ? wsAccuracy : prev.currentAccuracy,
+                position: {
+                  latitude: data.gnss?.latitude ?? prev.position.latitude,
+                  longitude: data.gnss?.longitude ?? prev.position.longitude,
+                  altitude: data.gnss?.altitude_msl ?? prev.position.altitude,
+                  accuracy: data.gnss?.horizontal_accuracy ?? prev.position.accuracy,
+                },
+                localCoordinates: wsLocalCoords,
+                valid: wsValid || prev.valid,
               };
             }
 
@@ -688,26 +758,27 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
                 inactiveSurveyReportsRef.current < 3 ||
                 (Date.now() - lastSurveyActiveAtRef.current) < 5000
               ) {
-                return {
-                  ...prev,
-                  satelliteCount: data.gnss?.num_satellites ?? prev.satelliteCount,
-                  currentAccuracy: shouldUpdateAccuracy ? wsAccuracy : prev.currentAccuracy,
-                  position: {
-                    latitude: data.gnss?.latitude ?? prev.position.latitude,
+                  return {
+                    ...prev,
+                    satelliteCount: preserveCount(data.gnss?.num_satellites, prev.satelliteCount),
+                    currentAccuracy: shouldUpdateAccuracy ? wsAccuracy : prev.currentAccuracy,
+                    position: {
+                      latitude: data.gnss?.latitude ?? prev.position.latitude,
                     longitude: data.gnss?.longitude ?? prev.position.longitude,
                     altitude: data.gnss?.altitude_msl ?? prev.position.altitude,
-                    accuracy: data.gnss?.horizontal_accuracy ?? prev.position.accuracy,
-                  },
-                  localCoordinates: wsLocalCoords,
-                };
+                      accuracy: data.gnss?.horizontal_accuracy ?? prev.position.accuracy,
+                    },
+                    localCoordinates: wsLocalCoords,
+                    valid: wsValid || prev.valid,
+                  };
+                }
               }
-            }
 
             return {
               ...prev,
-              elapsedTime: wsActive ? nextActiveElapsed : Math.max(wsElapsed, prev.elapsedTime, prev.requiredTime),
+              elapsedTime: wsActive ? nextActiveElapsed : Math.max(wsElapsed, prev.elapsedTime),
               progress: wsActive ? Math.min(nextActiveElapsed / Math.max(prev.requiredTime, 1), 1) : 1,
-              satelliteCount: data.gnss?.num_satellites ?? prev.satelliteCount,
+              satelliteCount: preserveCount(data.gnss?.num_satellites, prev.satelliteCount),
               currentAccuracy: shouldUpdateAccuracy ? wsAccuracy : prev.currentAccuracy,
               position: {
                 latitude: data.gnss?.latitude ?? prev.position.latitude,
@@ -718,6 +789,7 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
               localCoordinates: wsLocalCoords,
               isActive: wsActive,
               status: !wsActive ? 'completed' : prev.status,
+              valid: wsValid || prev.valid,
             };
           }
 
@@ -735,7 +807,37 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
         setConnection((prev) => ({ ...prev, isConnected: false }));
       }
     };
-  }, [addLog, syncConfigurationFromBackend]);
+  }, [addLog, lastSavedWsUrl, syncConfigurationFromBackend]);
+
+  useEffect(() => {
+    if (!survey.isActive) return;
+
+    const timer = setInterval(() => {
+      if (stoppingRef.current || !startInitiatedAtRef.current) {
+        return;
+      }
+
+      const derivedElapsed = Math.max(0, Math.floor((Date.now() - startInitiatedAtRef.current) / 1000));
+
+      setSurvey((prev) => {
+        if (!prev.isActive) {
+          return prev;
+        }
+
+        if (derivedElapsed <= prev.elapsedTime) {
+          return prev;
+        }
+
+        return {
+          ...prev,
+          elapsedTime: derivedElapsed,
+          progress: Math.min(derivedElapsed / Math.max(prev.requiredTime, 1), 1),
+        };
+      });
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, [survey.isActive]);
 
   useEffect(() => {
     const reconnectTimer = setInterval(() => {
@@ -756,14 +858,21 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
     try {
       const currentDuration = configuration.baseStation.surveyDuration;
       const currentAccuracy = configuration.baseStation.accuracyThreshold;
+      const requestStartedAt = Date.now();
       startPendingRef.current = true;
       startInitiatedAtRef.current = Date.now();
       inactiveSurveyReportsRef.current = 0;
       lastSurveyActiveAtRef.current = Date.now();
+      hasSeenActiveRef.current = false;
+      startupPollLogCountRef.current = 0;
+      startupWsLogCountRef.current = 0;
+
+      addLog('info', `Survey start requested. WS=${getWsUrl() ?? 'unset'} API=${getApiHost() ?? 'unset'} duration=${currentDuration}s accuracy=${currentAccuracy}cm`);
 
       setSurvey((prev) => ({
         ...prev,
-        isActive: true,
+        isActive: false,
+        valid: false,
         status: "initializing",
         progress: 0,
         elapsedTime: 0,
@@ -773,7 +882,7 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }));
 
       await api.startSurvey(currentDuration, currentAccuracy / 100);
-      addLog('info', 'Survey started successfully');
+      addLog('info', `Survey start response received in ${Date.now() - requestStartedAt}ms`);
     } catch (error) {
       startPendingRef.current = false;
       setSurveyHistory((prev) => [{
@@ -802,7 +911,7 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
       addLog('info', 'Stopping survey');
       stoppingRef.current = true;
       startPendingRef.current = false;
-      setSurvey((prev) => ({ ...prev, isActive: false, status: 'stopped' }));
+      setSurvey((prev) => ({ ...prev, isActive: false, valid: false, status: 'stopped' }));
 
       let stopAttempts = 0;
       let stopSucceeded = false;
@@ -838,7 +947,6 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
     try {
       let finalWsUrl = wsUrl;
 
-      // Auto mode: one strict 3-second check against the saved node only
       if (type === 'auto') {
         addLog('info', 'Auto Mode: Attempting stealth ping...');
         if (lastSavedWsUrl) {
@@ -1010,10 +1118,16 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
   useEffect(() => {
     const pollInterval = setInterval(async () => {
       if (!connection.isConnected) return;
-      if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
       try {
         const surveyStatus = await api.getSurveyStatus();
+        if (startPendingRef.current && startupPollLogCountRef.current < 8) {
+          startupPollLogCountRef.current += 1;
+          addLog(
+            'info',
+            `Poll survey update ${startupPollLogCountRef.current}: active=${String(surveyStatus?.active ?? false)}, progress=${String(surveyStatus?.progress_seconds ?? 'null')}, accuracy_m=${String(surveyStatus?.accuracy_m ?? 'null')}`
+          );
+        }
         if (surveyStatus && !stoppingRef.current) {
           syncConfigurationFromBackend(surveyStatus);
           setSurvey((prev) => {
@@ -1024,7 +1138,7 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
             const nextActiveElapsed = Math.max(prev.elapsedTime, pollElapsed);
             const withinStartGrace =
               startPendingRef.current &&
-              prev.isActive &&
+              (prev.isActive || prev.status === "initializing") &&
               !pollActive &&
               (Date.now() - startInitiatedAtRef.current) < START_PENDING_GRACE_MS;
             
@@ -1032,10 +1146,10 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
             const pos = surveyStatus.position || surveyStatus.local_position || {};
             
             const pollLocalCoords = {
-              meanX: parseVal(surveyStatus.mean_x_m ?? surveyStatus.meanX ?? surveyStatus.ecef_x ?? surveyStatus.x ?? pos.x ?? pos[0]) ?? prev.localCoordinates.meanX,
-              meanY: parseVal(surveyStatus.mean_y_m ?? surveyStatus.meanY ?? surveyStatus.ecef_y ?? surveyStatus.y ?? pos.y ?? pos[1]) ?? prev.localCoordinates.meanY,
-              meanZ: parseVal(surveyStatus.mean_z_m ?? surveyStatus.meanZ ?? surveyStatus.ecef_z ?? surveyStatus.z ?? pos.z ?? pos[2]) ?? prev.localCoordinates.meanZ,
-              observations: surveyStatus.observations ?? prev.localCoordinates.observations,
+              meanX: preserveCoordinate(parseVal(surveyStatus.mean_x_m ?? surveyStatus.meanX ?? surveyStatus.ecef_x ?? surveyStatus.x ?? pos.x ?? pos[0]), prev.localCoordinates.meanX),
+              meanY: preserveCoordinate(parseVal(surveyStatus.mean_y_m ?? surveyStatus.meanY ?? surveyStatus.ecef_y ?? surveyStatus.y ?? pos.y ?? pos[1]), prev.localCoordinates.meanY),
+              meanZ: preserveCoordinate(parseVal(surveyStatus.mean_z_m ?? surveyStatus.meanZ ?? surveyStatus.ecef_z ?? surveyStatus.z ?? pos.z ?? pos[2]), prev.localCoordinates.meanZ),
+              observations: preserveCount(surveyStatus.observations, prev.localCoordinates.observations),
             };
 
             if (pollActive) {
@@ -1047,14 +1161,24 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
             if (withinStartGrace) {
               return {
                 ...prev,
-                elapsedTime: nextActiveElapsed,
-                progress: Math.min(nextActiveElapsed / Math.max(prev.requiredTime, 1), 1),
                 currentAccuracy: pollAccuracy > 0 ? pollAccuracy : prev.currentAccuracy,
                 localCoordinates: pollLocalCoords,
+                valid: pollValid || prev.valid,
+              };
+            }
+
+            if (startPendingRef.current && !hasSeenActiveRef.current && !pollActive) {
+              return {
+                ...prev,
+                status: "initializing",
+                currentAccuracy: pollAccuracy > 0 ? pollAccuracy : prev.currentAccuracy,
+                localCoordinates: pollLocalCoords,
+                valid: pollValid || prev.valid,
               };
             }
 
             const shouldTreatInactiveAsFinal =
+              hasSeenActiveRef.current &&
               !pollActive &&
               (
                 pollValid ||
@@ -1072,6 +1196,7 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
                   ...prev,
                   currentAccuracy: pollAccuracy > 0 ? pollAccuracy : prev.currentAccuracy,
                   localCoordinates: pollLocalCoords,
+                  valid: pollValid || prev.valid,
                 };
               }
             }
@@ -1080,24 +1205,25 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
               ...prev,
               elapsedTime: pollActive
                 ? nextActiveElapsed
-                : Math.max(pollElapsed, prev.elapsedTime, prev.requiredTime),
+                : Math.max(pollElapsed, prev.elapsedTime),
               progress: pollActive
                 ? Math.min(nextActiveElapsed / Math.max(prev.requiredTime, 1), 1)
                 : 1,
               currentAccuracy: pollAccuracy > 0 ? pollAccuracy : prev.currentAccuracy,
               isActive: pollActive,
               localCoordinates: pollLocalCoords,
-              status: pollActive ? "in-progress" : (prev.isActive && !pollActive ? "completed" : prev.status)
+              status: pollActive ? "in-progress" : (prev.isActive && !pollActive ? "completed" : prev.status),
+              valid: pollValid || prev.valid,
             };
           });
         }
       } catch (e) {
         console.warn("Survey status poll failed:", e);
       }
-    }, survey.isActive ? 2000 : 5000);
+    }, survey.isActive || survey.status === "initializing" ? 2000 : 5000);
 
     return () => clearInterval(pollInterval);
-  }, [survey.isActive, connection.isConnected, syncConfigurationFromBackend]);
+  }, [survey.isActive, survey.status, connection.isConnected, syncConfigurationFromBackend]);
 
   /* ================= UNIFIED SURVEY LIFECYCLE WATCHER ================= */
   const prevIsActive = useRef(survey.isActive);
@@ -1141,7 +1267,7 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
         } as any, ...prev]);
       } 
       else {
-        const isSuccess = survey.currentAccuracy <= survey.targetAccuracy && survey.currentAccuracy > 0;
+        const isSuccess = survey.valid || (survey.currentAccuracy <= survey.targetAccuracy && survey.currentAccuracy > 0);
         
         setSurveyHistory((prev) => [{
           id: `SRV-${isSuccess ? 'COMP' : 'ERR'}-${Date.now().toString().slice(-6)}`,

@@ -500,7 +500,7 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { useGNSS } from '../../../context/GNSSContext';
-import { api } from '../../../api/gnssApi';
+import { api } from '../../../api/gnssApiDynamic';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../ui/card';
 import { Button } from '../ui/button';
 import { Badge } from '../ui/badge';
@@ -537,48 +537,73 @@ export const SurveyStatus: React.FC = () => {
   const [finalAccuracyRecord, setFinalAccuracyRecord] = useState<AccuracyRecord | null>(null);
   const [showAccuracyHistory, setShowAccuracyHistory] = useState(false);
   const [displayElapsedTime, setDisplayElapsedTime] = useState(0);
-  const lastSyncedElapsedRef = useRef(0);
-  const lastSyncedAtRef = useRef(Date.now());
+  const prevIsActiveRef = useRef(survey.isActive);
+  const prevStatusRef = useRef(survey.status);
+  const startToastIdRef = useRef<string | number | null>(null);
   const [progressPercentage, setProgressPercentage] = useState(0);
-  const hasMetTargetAccuracy = survey.currentAccuracy > 0 && survey.currentAccuracy <= survey.targetAccuracy;
+  const hasMetTargetAccuracy = survey.valid || (survey.currentAccuracy > 0 && survey.currentAccuracy <= survey.targetAccuracy);
   const showFixedIndicators = !survey.isActive && survey.status !== 'stopped' && hasMetTargetAccuracy;
 
   const requiredTimeSecs = survey.requiredTime > 0 ? survey.requiredTime : configuration.baseStation.surveyDuration;
 
   useEffect(() => {
-    if (survey.isActive) {
-      const backendElapsed = Math.max(lastSyncedElapsedRef.current, survey.elapsedTime);
-      lastSyncedElapsedRef.current = backendElapsed;
-      lastSyncedAtRef.current = Date.now();
-      setDisplayElapsedTime(backendElapsed);
+    const justStarted = survey.isActive && !prevIsActiveRef.current;
+    prevIsActiveRef.current = survey.isActive;
+
+    if (survey.status === 'initializing') {
+      setDisplayElapsedTime(0);
       return;
     }
 
-    const settledElapsed = survey.status === 'completed'
-      ? requiredTimeSecs
-      : Math.min(survey.elapsedTime, requiredTimeSecs);
-    lastSyncedElapsedRef.current = settledElapsed;
-    lastSyncedAtRef.current = Date.now();
+    if (survey.isActive || justStarted) {
+      setDisplayElapsedTime(survey.elapsedTime);
+      return;
+    }
+
+    const settledElapsed = Math.min(survey.elapsedTime, requiredTimeSecs);
     setDisplayElapsedTime(settledElapsed);
   }, [survey.elapsedTime, survey.isActive, survey.status, requiredTimeSecs]);
 
+  const clampedElapsedTime = Math.min(displayElapsedTime, requiredTimeSecs);
+
   useEffect(() => {
-    if (!survey.isActive) {
-      return;
+    const prevStatus = prevStatusRef.current;
+    const becameRunning = prevStatus !== 'in-progress' && survey.status === 'in-progress';
+    const justEnteredInitializing = prevStatus !== 'initializing' && survey.status === 'initializing';
+    const justFailed = prevStatus !== 'failed' && survey.status === 'failed';
+
+    if (justEnteredInitializing) {
+      if (startToastIdRef.current !== null) {
+        toast.dismiss(startToastIdRef.current);
+      }
+      startToastIdRef.current = toast.loading('Starting survey...');
     }
 
-    const timer = setInterval(() => {
-      const secondsSinceSync = Math.floor((Date.now() - lastSyncedAtRef.current) / 1000);
-      setDisplayElapsedTime((prev) => {
-        const projected = Math.min(requiredTimeSecs, lastSyncedElapsedRef.current + secondsSinceSync);
-        return projected >= prev ? projected : prev;
-      });
-    }, 250);
+    if (becameRunning) {
+      if (startToastIdRef.current !== null) {
+        toast.dismiss(startToastIdRef.current);
+        startToastIdRef.current = null;
+      }
+      uiLogger.log('Survey Started Successfully', 'SurveyStatus');
+      toast.success('Survey started');
+      setIsLoading(false);
+    }
 
-    return () => clearInterval(timer);
-  }, [survey.isActive, requiredTimeSecs]);
+    if (justFailed) {
+      if (startToastIdRef.current !== null) {
+        toast.dismiss(startToastIdRef.current);
+        startToastIdRef.current = null;
+      }
+      setIsLoading(false);
+    }
 
-  const clampedElapsedTime = Math.min(displayElapsedTime, requiredTimeSecs);
+    if (!survey.isActive && survey.status !== 'initializing' && startToastIdRef.current !== null && prevStatus === 'initializing') {
+      toast.dismiss(startToastIdRef.current);
+      startToastIdRef.current = null;
+    }
+
+    prevStatusRef.current = survey.status;
+  }, [survey.status, survey.isActive]);
 
   useEffect(() => {
     const percentage = requiredTimeSecs > 0
@@ -659,15 +684,12 @@ export const SurveyStatus: React.FC = () => {
       });
 
       await startSurvey();
-
-      uiLogger.log('Survey Started Successfully', 'SurveyStatus');
-      toast.success('Survey started');
-
-      setTimeout(() => {
-        setIsLoading(false);
-      }, 100);
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
+      if (startToastIdRef.current !== null) {
+        toast.dismiss(startToastIdRef.current);
+        startToastIdRef.current = null;
+      }
       uiLogger.log('Start Survey Failed', 'SurveyStatus', undefined, errorMsg);
       toast.error(`Failed to start survey: ${errorMsg}`);
       setIsLoading(false);
@@ -697,6 +719,7 @@ export const SurveyStatus: React.FC = () => {
 
   const getDisplayStatus = () => {
     if (survey.isActive) return 'In Progress';
+    if (survey.status === 'initializing') return 'Initializing';
     if (survey.status === 'stopped') return 'Stopped';
     if (showFixedIndicators) return 'Position Fixed';
     return 'Idle';
@@ -704,6 +727,7 @@ export const SurveyStatus: React.FC = () => {
 
   const getStatusBadgeColor = () => {
     if (survey.isActive) return survey.status === 'initializing' ? 'bg-blue-500 text-white' : 'bg-amber-500 text-white';
+    if (survey.status === 'initializing') return 'bg-blue-500 text-white';
     if (survey.status === 'stopped') return 'bg-red-500 text-white';
     if (showFixedIndicators) return 'bg-emerald-500 text-white';
     return 'bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300';
@@ -723,9 +747,7 @@ export const SurveyStatus: React.FC = () => {
   }, [survey.isActive, survey.currentAccuracy, clampedElapsedTime]);
 
   const displayAccuracy = !survey.isActive && lockedAccuracy.current > 0 ? lockedAccuracy.current : survey.currentAccuracy;
-  const finalDisplayTime = !survey.isActive && survey.status === 'completed'
-    ? requiredTimeSecs
-    : (!survey.isActive && lockedTime.current > 0 ? lockedTime.current : clampedElapsedTime);
+  const finalDisplayTime = !survey.isActive && lockedTime.current > 0 ? lockedTime.current : clampedElapsedTime;
 
   return (
     <div className="space-y-6">
@@ -844,8 +866,12 @@ export const SurveyStatus: React.FC = () => {
 
           <div className="flex gap-3">
             {!survey.isActive ? (
-              <Button onClick={handleStartSurvey} className="flex-1 gap-2 bg-blue-600 hover:bg-blue-700 text-white" disabled={isLoading}>
-                <Play className="size-4" /> Start Survey
+              <Button
+                onClick={handleStartSurvey}
+                className="flex-1 gap-2 bg-blue-600 hover:bg-blue-700 text-white"
+                disabled={isLoading || survey.status === 'initializing'}
+              >
+                <Play className="size-4" /> {survey.status === 'initializing' ? 'Starting Survey' : 'Start Survey'}
               </Button>
             ) : (
               <Button onClick={handleStopSurvey} variant="destructive" className="flex-1 gap-2" disabled={isLoading}>

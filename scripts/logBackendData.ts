@@ -11,8 +11,23 @@ import * as path from "path";
 
 /* ================= CONFIG ================= */
 
-const API_BASE = "http://192.168.1.33:8000";
-const WS_URL = "ws://192.168.1.33:8000/ws/status";
+const readOption = (name: string): string | undefined => {
+  const arg = process.argv.find((value) => value.startsWith(`--${name}=`));
+  return arg ? arg.slice(name.length + 3) : undefined;
+};
+
+const apiBaseFromInput = readOption("api-base") ?? process.env.GNSS_API_BASE;
+
+if (!apiBaseFromInput) {
+  throw new Error(
+    "GNSS API base is required. Pass --api-base=http://<host>:<port> or set GNSS_API_BASE."
+  );
+}
+
+const API_BASE = apiBaseFromInput.replace(/\/$/, "");
+const apiUrl = new URL(API_BASE);
+const wsProtocol = apiUrl.protocol === "https:" ? "wss:" : "ws:";
+const WS_URL = readOption("ws-url") ?? process.env.GNSS_WS_URL ?? `${wsProtocol}//${apiUrl.host}/ws/status`;
 const LOG_DIR = path.join(__dirname, "../logs");
 const TIMESTAMP = new Date().toISOString().replace(/[:.]/g, "-");
 const LOG_FILE = path.join(LOG_DIR, `backend-log-${TIMESTAMP}.json`);
