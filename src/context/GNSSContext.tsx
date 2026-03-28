@@ -269,6 +269,25 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return next;
   };
 
+  const getAutoFlowPayload = useCallback(() => ({
+    msm_type: "MSM4",
+    min_duration_sec: configuration.baseStation.surveyDuration,
+    accuracy_limit_m: configuration.baseStation.accuracyThreshold / 100,
+    ntrip_host: configuration.streams.ntrip.server,
+    ntrip_port: configuration.streams.ntrip.port,
+    ntrip_mountpoint: configuration.streams.ntrip.mountpoint,
+    ntrip_password: configuration.streams.ntrip.password,
+    ntrip_username: configuration.streams.ntrip.username,
+  }), [
+    configuration.baseStation.surveyDuration,
+    configuration.baseStation.accuracyThreshold,
+    configuration.streams.ntrip.server,
+    configuration.streams.ntrip.port,
+    configuration.streams.ntrip.mountpoint,
+    configuration.streams.ntrip.password,
+    configuration.streams.ntrip.username,
+  ]);
+
   const persistConfiguration = useCallback((config: Configuration) => {
     try {
       localStorage.setItem(STORAGE_KEYS.configuration, JSON.stringify(config));
@@ -647,11 +666,9 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
           },
         }));
 
-        syncConfigurationFromBackend(data);
-
-        if (data.autoflow !== undefined) {
-          setIsAutoFlowActive(data.autoflow.active ?? false);
-        }
+        // Runtime Autoflow state is sourced from /api/v1/autoflow/status polling.
+        // WebSocket autoflow payloads can lag or use different semantics, which
+        // caused the UI to flicker between idle and running.
 
         if (startPendingRef.current && startupWsLogCountRef.current < 8) {
           startupWsLogCountRef.current += 1;
@@ -859,6 +876,7 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const currentDuration = configuration.baseStation.surveyDuration;
       const currentAccuracy = configuration.baseStation.accuracyThreshold;
       const requestStartedAt = Date.now();
+      const payload = getAutoFlowPayload();
       startPendingRef.current = true;
       startInitiatedAtRef.current = Date.now();
       inactiveSurveyReportsRef.current = 0;
@@ -867,7 +885,7 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
       startupPollLogCountRef.current = 0;
       startupWsLogCountRef.current = 0;
 
-      addLog('info', `Survey start requested. WS=${getWsUrl() ?? 'unset'} API=${getApiHost() ?? 'unset'} duration=${currentDuration}s accuracy=${currentAccuracy}cm`);
+      addLog('info', `Auto Flow start requested. WS=${getWsUrl() ?? 'unset'} API=${getApiHost() ?? 'unset'} duration=${currentDuration}s accuracy=${currentAccuracy}cm`);
 
       setSurvey((prev) => ({
         ...prev,
@@ -881,8 +899,8 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
         currentAccuracy: 0,
       }));
 
-      await api.startSurvey(currentDuration, currentAccuracy / 100);
-      addLog('info', `Survey start response received in ${Date.now() - requestStartedAt}ms`);
+      await api.startAutoFlow(payload);
+      addLog('info', `Auto Flow start response received in ${Date.now() - requestStartedAt}ms`);
     } catch (error) {
       startPendingRef.current = false;
       setSurveyHistory((prev) => [{
@@ -896,19 +914,19 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
         localCoordinates: { meanX: 0, meanY: 0, meanZ: 0, observations: 0 },
         success: false,
         eventType: 'error',
-        message: `Hardware failed to initiate survey: ${String(error)}`
+        message: `Hardware failed to initiate Auto Flow: ${String(error)}`
       } as any, ...prev]);
 
-      addLog('error', `Survey start failed: ${String(error)}`);
+      addLog('error', `Auto Flow start failed: ${String(error)}`);
       setSurvey((prev) => ({ ...prev, isActive: false, status: "failed" }));
       throw error;
     }
-  }, [configuration.baseStation.surveyDuration, configuration.baseStation.accuracyThreshold, addLog]);
+  }, [configuration.baseStation.surveyDuration, configuration.baseStation.accuracyThreshold, addLog, getAutoFlowPayload]);
 
   /* ================= STOP SURVEY ================= */
   const stopSurvey = useCallback(async () => {
     try {
-      addLog('info', 'Stopping survey');
+      addLog('info', 'Stopping Auto Flow');
       stoppingRef.current = true;
       startPendingRef.current = false;
       setSurvey((prev) => ({ ...prev, isActive: false, valid: false, status: 'stopped' }));
@@ -920,20 +938,20 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
       while (stopAttempts < maxRetries && !stopSucceeded) {
         try {
           stopAttempts++;
-          await api.stopSurvey();
+          await api.stopAutoFlow();
           stopSucceeded = true;
-          addLog('info', 'Survey stopped successfully on backend');
+          addLog('info', 'Auto Flow stopped successfully on backend');
         } catch (apiError) {
           if (stopAttempts < maxRetries) {
             addLog('warning', `Stop attempt ${stopAttempts}/${maxRetries} failed, retrying...`);
             await new Promise(resolve => setTimeout(resolve, 500));
           } else {
-            addLog('warning', `Backend stop failed after ${maxRetries} attempts (UI stopped locally)`);
+            addLog('warning', `Auto Flow stop failed after ${maxRetries} attempts (UI stopped locally)`);
           }
         }
       }
     } catch (error) {
-      addLog('error', `Unexpected survey stop error: ${String(error)}`);
+      addLog('error', `Unexpected Auto Flow stop error: ${String(error)}`);
       setSurvey((prev) => ({ ...prev, isActive: false, status: 'stopped' }));
     } finally {
       setTimeout(() => {
@@ -1129,7 +1147,6 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
           );
         }
         if (surveyStatus && !stoppingRef.current) {
-          syncConfigurationFromBackend(surveyStatus);
           setSurvey((prev) => {
             const pollAccuracy = (surveyStatus.accuracy_m ?? 0) * 100;
             const pollElapsed = surveyStatus.progress_seconds ?? prev.elapsedTime;

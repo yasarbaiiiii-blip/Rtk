@@ -746,7 +746,19 @@ export const SurveyStatus: React.FC = () => {
     }
   }, [survey.isActive, survey.currentAccuracy, clampedElapsedTime]);
 
-  const displayAccuracy = !survey.isActive && lockedAccuracy.current > 0 ? lockedAccuracy.current : survey.currentAccuracy;
+  const statusAccuracyCm = gnssStatus.globalPosition.horizontalAccuracy > 0
+    ? gnssStatus.globalPosition.horizontalAccuracy * 100
+    : 0;
+  const displayAccuracy = !survey.isActive && lockedAccuracy.current > 0
+    ? lockedAccuracy.current
+    : survey.currentAccuracy > 0
+    ? survey.currentAccuracy
+    : statusAccuracyCm;
+  const displaySatelliteCount = survey.satelliteCount > 0
+    ? survey.satelliteCount
+    : gnssStatus.satellites.length > 0
+    ? gnssStatus.satellites.length
+    : 0;
   const finalDisplayTime = !survey.isActive && lockedTime.current > 0 ? lockedTime.current : clampedElapsedTime;
 
   return (
@@ -817,7 +829,7 @@ export const SurveyStatus: React.FC = () => {
 
             <div className="text-center p-4 rounded-xl bg-slate-50 dark:bg-slate-950/50 border border-slate-200 dark:border-slate-800/80">
               <Satellite className="size-5 mx-auto mb-2 text-purple-500" />
-              <div className="text-2xl font-bold text-slate-900 dark:text-slate-50">{survey.satelliteCount > 0 ? survey.satelliteCount : 'NIL'}</div>
+              <div className="text-2xl font-bold text-slate-900 dark:text-slate-50">{displaySatelliteCount > 0 ? displaySatelliteCount : 'NIL'}</div>
               <div className="text-xs font-semibold text-slate-500 dark:text-slate-400 mt-1">Satellites</div>
             </div>
 

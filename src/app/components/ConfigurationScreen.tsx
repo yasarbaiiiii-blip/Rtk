@@ -137,7 +137,7 @@ const SectionCard: React.FC<{
 export const ConfigurationScreen: React.FC = () => {
   const { configuration, updateConfiguration, survey, streams, gnssStatus, startNTRIP, stopNTRIP, isAutoFlowActive } = useGNSS();
   const [config, setConfig] = useState(configuration);
-  const lastAppliedConfigRef = useRef(JSON.stringify(configuration));
+  const [isDirty, setIsDirty] = useState(false);
   const [activeMsgType, setActiveMsgType] = useState<'MSM4' | 'MSM7'>('MSM4');
   const [rtcmActiveMessages, setRtcmActiveMessages] = useState<string[]>([]);
   const [rtcmLoading, setRtcmLoading] = useState(true);
@@ -195,19 +195,19 @@ export const ConfigurationScreen: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    const nextSerialized = JSON.stringify(configuration);
-    setConfig((prev) => {
-      const hasUnsavedLocalChanges = JSON.stringify(prev) !== lastAppliedConfigRef.current;
-      lastAppliedConfigRef.current = nextSerialized;
-      return hasUnsavedLocalChanges ? prev : configuration;
-    });
-  }, [configuration]);
+    if (!isDirty) {
+      setConfig(configuration);
+    }
+  }, [configuration, isDirty]);
 
   useEffect(() => {
     if (!config.baseStation.autoMode) {
       setAutoFlowPromptDismissed(false);
     }
   }, [config.baseStation.autoMode]);
+
+  const backendAutoFlowEnabled = configuration.baseStation.autoMode;
+  const isAutoFlowToggleDirty = config.baseStation.autoMode !== backendAutoFlowEnabled;
 
   const handleMsmTypeChange = async (type: 'MSM4' | 'MSM7') => {
     setActiveMsgType(type);
@@ -273,41 +273,45 @@ export const ConfigurationScreen: React.FC = () => {
     };
   };
 
+  const updateDraftConfig = (updater: (prev: typeof config) => typeof config) => {
+    setIsDirty(true);
+    setConfig((prev) => updater(prev));
+  };
+
   const handleSave = async (): Promise<boolean> => {
     uiLogger.log('Save Configuration clicked', 'ConfigurationScreen', config);
     const payload = getAutoFlowPayload();
-
-    // Fire off backend saves asynchronously so UI doesn't freeze for 5+ seconds
-    (async () => {
-      try {
-        if (api.saveAutoFlowConfig) {
-          await api.saveAutoFlowConfig(payload);
-        } else {
-          throw new Error("No save endpoint");
-        }
-      } catch (e) {
-        console.warn('Fallback: saveAutoFlowConfig failed, using enableAutoFlow', e);
-      }
+    try {
+      let enableDisableResponse: any = null;
 
       if (config.baseStation.autoMode) {
-        await api.enableAutoFlow(payload).catch(() => {});
+        enableDisableResponse = await api.enableAutoFlow(payload);
       } else {
-        await api.disableAutoFlow().catch(() => {});
+        enableDisableResponse = await api.disableAutoFlow();
       }
-    })();
 
-    setAutoFlowPromptDismissed(false);
+      const backendSnapshot = await api.getAutoFlowConfig().catch(() => null);
+      const normalizedConfig = normalizeSavedConfig(
+        backendSnapshot ?? enableDisableResponse ?? { enabled: config.baseStation.autoMode, config: payload }
+      );
 
-    // Apply config locally instantly for snappy UI
-    lastAppliedConfigRef.current = JSON.stringify(config);
-    updateConfiguration(config);
-    uiLogger.log('Configuration saved', 'ConfigurationScreen');
-    toast.success(
-      config.baseStation.autoMode
-        ? 'Auto Flow profile enabled. Start it manually when needed.'
-        : 'Configuration saved successfully'
-    );
-    return true;
+      setAutoFlowPromptDismissed(false);
+      setIsDirty(false);
+      setConfig(normalizedConfig);
+      updateConfiguration(normalizedConfig);
+      uiLogger.log('Configuration saved', 'ConfigurationScreen');
+      toast.success(
+        normalizedConfig.baseStation.autoMode
+          ? 'Auto Flow enabled and configuration saved.'
+          : 'Auto Flow disabled and configuration saved.'
+      );
+      return true;
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      uiLogger.log('Save Configuration Failed', 'ConfigurationScreen', undefined, errorMsg);
+      toast.error(`Failed to save configuration: ${errorMsg}`);
+      return false;
+    }
   };
 
   const handleStartAutoFlow = async () => {
@@ -340,7 +344,7 @@ export const ConfigurationScreen: React.FC = () => {
 
   const handleReset = () => {
     uiLogger.log('Reset Configuration clicked', 'ConfigurationScreen');
-    lastAppliedConfigRef.current = JSON.stringify(configuration);
+    setIsDirty(false);
     setConfig(configuration);
     toast.info('Configuration reset to defaults');
   };
@@ -395,13 +399,13 @@ export const ConfigurationScreen: React.FC = () => {
   }, [receiverConfig.active]);
 
   const loadCurrentSurvey = () => {
-    setConfig({
-      ...config,
+    updateDraftConfig((prev) => ({
+      ...prev,
       baseStation: {
-        ...config.baseStation,
+        ...prev.baseStation,
         fixedMode: { enabled: true, coordinates: survey.position },
       },
-    });
+    }));
     toast.success('Loaded coordinates from current survey');
   };
 
@@ -582,6 +586,69 @@ export const ConfigurationScreen: React.FC = () => {
               )}
               */}
 
+              <div className="relative overflow-hidden rounded-2xl border border-slate-200 dark:border-slate-800/80 bg-gradient-to-br from-white via-blue-50/60 to-slate-50 dark:from-slate-900 dark:via-blue-950/10 dark:to-slate-950 shadow-sm">
+                <div className="absolute inset-x-0 top-0 h-1 bg-gradient-to-r from-blue-500 via-cyan-400 to-emerald-400" />
+                <div className="p-4 md:p-5">
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="pr-3">
+                      <div className="flex items-center gap-3">
+                        <div className={`flex h-10 w-10 items-center justify-center rounded-xl shadow-sm ${
+                          config.baseStation.autoMode
+                            ? 'bg-blue-600 text-white'
+                            : 'bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-300'
+                        }`}>
+                          <Activity className="size-4" />
+                        </div>
+                        <div>
+                          <Label htmlFor="autoflow-mode" className="text-sm font-semibold text-slate-900 dark:text-slate-100 cursor-pointer">
+                            Autoflow Mode
+                          </Label>
+                          <p className="text-[11px] font-medium text-slate-500 dark:text-slate-400 mt-0.5">
+                            Toggling here only changes the draft. Autoflow changes on the backend only after Save & Close.
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                    <Switch
+                      id="autoflow-mode"
+                      checked={config.baseStation.autoMode}
+                      onCheckedChange={(checked) => updateDraftConfig((prev) => ({ ...prev, baseStation: { ...prev.baseStation, autoMode: checked } }))}
+                    />
+                  </div>
+
+                  <div className="mt-4 grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div className="rounded-xl border border-slate-200 dark:border-slate-800/80 bg-white/80 dark:bg-slate-950/60 p-3.5 shadow-sm">
+                      <div className="text-[10px] font-semibold uppercase tracking-widest text-slate-500 dark:text-slate-400 mb-1">Backend State</div>
+                      <div className={`text-sm font-semibold ${backendAutoFlowEnabled ? 'text-blue-700 dark:text-blue-300' : 'text-slate-700 dark:text-slate-300'}`}>
+                        {backendAutoFlowEnabled ? 'Enabled' : 'Disabled'}
+                      </div>
+                    </div>
+                    <div className="rounded-xl border border-slate-200 dark:border-slate-800/80 bg-white/80 dark:bg-slate-950/60 p-3.5 shadow-sm">
+                      <div className="text-[10px] font-semibold uppercase tracking-widest text-slate-500 dark:text-slate-400 mb-1">Draft State</div>
+                      <div className={`text-sm font-semibold ${
+                        isAutoFlowToggleDirty
+                          ? 'text-amber-700 dark:text-amber-300'
+                          : config.baseStation.autoMode
+                          ? 'text-blue-700 dark:text-blue-300'
+                          : 'text-slate-700 dark:text-slate-300'
+                      }`}>
+                        {isAutoFlowToggleDirty
+                          ? config.baseStation.autoMode
+                            ? 'Will Enable On Save'
+                            : 'Will Disable On Save'
+                          : 'Synced With Backend'}
+                      </div>
+                    </div>
+                    <div className="rounded-xl border border-slate-200 dark:border-slate-800/80 bg-white/80 dark:bg-slate-950/60 p-3.5 shadow-sm">
+                      <div className="text-[10px] font-semibold uppercase tracking-widest text-slate-500 dark:text-slate-400 mb-1">Runtime</div>
+                      <div className={`text-sm font-semibold ${isAutoFlowActive ? 'text-emerald-700 dark:text-emerald-300' : 'text-slate-700 dark:text-slate-300'}`}>
+                        {isAutoFlowActive ? 'Currently Running' : 'Currently Idle'}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 {/* Duration */}
                 <div className={boxClasses}>
@@ -596,7 +663,7 @@ export const ConfigurationScreen: React.FC = () => {
                       id="survey-duration"
                       min={0} max={600} step={10}
                       value={[config.baseStation.surveyDuration]}
-                      onValueChange={([value]) => setConfig({ ...config, baseStation: { ...config.baseStation, surveyDuration: value } })}
+                      onValueChange={([value]) => updateDraftConfig((prev) => ({ ...prev, baseStation: { ...prev.baseStation, surveyDuration: value } }))}
                     />
                     <div className="relative">
                       <Input
@@ -604,13 +671,13 @@ export const ConfigurationScreen: React.FC = () => {
                         value={config.baseStation.surveyDuration || ''}
                         onChange={(e) => {
                           const v = parseInt(e.target.value);
-                          setConfig({ ...config, baseStation: { ...config.baseStation, surveyDuration: isNaN(v) ? 0 : v } });
+                          updateDraftConfig((prev) => ({ ...prev, baseStation: { ...prev.baseStation, surveyDuration: isNaN(v) ? 0 : v } }));
                         }}
                         onBlur={(e) => {
                           let v = parseInt(e.target.value);
                           if (isNaN(v) || v < 0) v = 0;
                           if (v > 600) v = 600;
-                          setConfig({ ...config, baseStation: { ...config.baseStation, surveyDuration: v } });
+                          updateDraftConfig((prev) => ({ ...prev, baseStation: { ...prev.baseStation, surveyDuration: v } }));
                         }}
                         className={`${inputClasses} pr-10 font-mono text-sm text-center`}
                       />
@@ -632,7 +699,7 @@ export const ConfigurationScreen: React.FC = () => {
                       id="accuracy-threshold"
                       min={1} max={300} step={1}
                       value={[config.baseStation.accuracyThreshold]}
-                      onValueChange={([value]) => setConfig({ ...config, baseStation: { ...config.baseStation, accuracyThreshold: value } })}
+                      onValueChange={([value]) => updateDraftConfig((prev) => ({ ...prev, baseStation: { ...prev.baseStation, accuracyThreshold: value } }))}
                     />
                     <div className="relative">
                       <Input
@@ -640,13 +707,13 @@ export const ConfigurationScreen: React.FC = () => {
                         value={config.baseStation.accuracyThreshold || ''}
                         onChange={(e) => {
                           const v = parseInt(e.target.value);
-                          setConfig({ ...config, baseStation: { ...config.baseStation, accuracyThreshold: isNaN(v) ? 0 : v } });
+                          updateDraftConfig((prev) => ({ ...prev, baseStation: { ...prev.baseStation, accuracyThreshold: isNaN(v) ? 0 : v } }));
                         }}
                         onBlur={(e) => {
                           let v = parseInt(e.target.value);
                           if (isNaN(v) || v < 1) v = 1;
                           if (v > 300) v = 300;
-                          setConfig({ ...config, baseStation: { ...config.baseStation, accuracyThreshold: v } });
+                          updateDraftConfig((prev) => ({ ...prev, baseStation: { ...prev.baseStation, accuracyThreshold: v } }));
                         }}
                         className={`${inputClasses} pr-10 font-mono text-sm text-center`}
                       />

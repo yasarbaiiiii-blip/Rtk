@@ -55,28 +55,6 @@ export const api = {
   getRTCM: async () => fetch(`${requireApiBase()}/api/v1/rtcm`).then(handleResponse),
   getNTRIP: async () => fetch(`${requireApiBase()}/api/v1/ntrip`).then(handleResponse),
 
-  startSurvey: async (minDurationSec: number, accuracyLimitM: number) => {
-    const base = requireApiBase();
-    const requestBody = { min_duration_sec: minDurationSec, accuracy_limit_m: accuracyLimitM };
-    console.log(`API Request [POST] ${base}/api/v1/survey/start:`, requestBody);
-
-    return fetch(`${base}/api/v1/survey/start`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(requestBody),
-    }).then(handleResponse);
-  },
-
-  stopSurvey: async () => {
-    const base = requireApiBase();
-    console.log(`API Request [POST] ${base}/api/v1/survey/stop:`, {});
-
-    return fetch(`${base}/api/v1/survey/stop`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-    }).then(handleResponse);
-  },
-
   getAutoFlowConfig: async () => fetch(`${requireApiBase()}/api/v1/autoflow/config`).then(handleResponse),
   saveAutoFlowConfig: async (config: any) => {
     const base = requireApiBase();

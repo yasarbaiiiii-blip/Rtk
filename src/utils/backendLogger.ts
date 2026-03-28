@@ -85,17 +85,24 @@ class BackendLogger {
         const response = await originalFetch(resource, config);
         const duration = performance.now() - startTime;
 
-        // Try to clone and read response
-        let responseData: unknown;
+        // Always inspect a clone so the original response body remains untouched.
+        let responseData: unknown = null;
         try {
           const clonedResponse = response.clone();
-          responseData = await clonedResponse.json();
+          const responseText = await clonedResponse.text();
+
+          if (responseText.length > 0) {
+            try {
+              responseData = JSON.parse(responseText);
+            } catch {
+              responseData = responseText;
+            }
+          }
         } catch {
-          responseData = await response.text();
+          responseData = null;
         }
 
-        // Log API response
-        const responseLog = this.addLog("API_RESPONSE", {
+        this.addLog("API_RESPONSE", {
           endpoint,
           method,
           status: response.status,
@@ -103,7 +110,7 @@ class BackendLogger {
           duration,
         });
 
-        return response.clone();
+        return response;
       } catch (error) {
         const duration = performance.now() - startTime;
 
