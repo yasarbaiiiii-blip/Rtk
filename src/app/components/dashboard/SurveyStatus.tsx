@@ -749,11 +749,11 @@ export const SurveyStatus: React.FC = () => {
   const statusAccuracyCm = gnssStatus.globalPosition.horizontalAccuracy > 0
     ? gnssStatus.globalPosition.horizontalAccuracy * 100
     : 0;
-  const displayAccuracy = !survey.isActive && lockedAccuracy.current > 0
+  const displayAccuracy = statusAccuracyCm > 0
+    ? statusAccuracyCm
+    : !survey.isActive && lockedAccuracy.current > 0
     ? lockedAccuracy.current
-    : survey.currentAccuracy > 0
-    ? survey.currentAccuracy
-    : statusAccuracyCm;
+    : survey.currentAccuracy;
   const displaySatelliteCount = survey.satelliteCount > 0
     ? survey.satelliteCount
     : gnssStatus.satellites.length > 0
