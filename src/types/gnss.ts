@@ -104,6 +104,7 @@ export interface NTRIPStream extends StreamInfo {
   mountpoint: string;
   uptime: number;
   dataSent: number;
+  dataReceived: number;
   lastError: string | null;
 }
 

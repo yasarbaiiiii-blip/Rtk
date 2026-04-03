@@ -44,6 +44,8 @@ const handleResponse = async (response: Response) => {
 export const api = {
   getHealth: async () => fetch(`${requireApiBase()}/api/v1/health`).then(handleResponse),
   getStatus: async () => fetch(`${requireApiBase()}/api/v1/status`).then(handleResponse),
+  getStatusPosition: async () => fetch(`${requireApiBase()}/api/v1/status/position`).then(handleResponse),
+  getStatusSurvey: async () => fetch(`${requireApiBase()}/api/v1/status/survey`).then(handleResponse),
   getSurvey: async () => fetch(`${requireApiBase()}/api/v1/survey`).then(handleResponse),
   getSurveyStatus: async () => {
     const base = requireApiBase();

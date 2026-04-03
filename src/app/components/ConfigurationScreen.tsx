@@ -225,6 +225,7 @@ export const ConfigurationScreen: React.FC = () => {
   };
 
   const getAutoFlowPayload = () => ({
+    enabled: config.baseStation.autoMode,
     msm_type: activeMsgType,
     min_duration_sec: config.baseStation.surveyDuration,
     accuracy_limit_m: config.baseStation.accuracyThreshold / 100,
@@ -233,6 +234,7 @@ export const ConfigurationScreen: React.FC = () => {
     ntrip_mountpoint: config.streams.ntrip.mountpoint,
     ntrip_password: config.streams.ntrip.password,
     ntrip_username: config.streams.ntrip.username,
+    ntrip_version: 1,
   });
 
   const normalizeSavedConfig = (saved: any) => {
@@ -282,17 +284,11 @@ export const ConfigurationScreen: React.FC = () => {
     uiLogger.log('Save Configuration clicked', 'ConfigurationScreen', config);
     const payload = getAutoFlowPayload();
     try {
-      let enableDisableResponse: any = null;
-
-      if (config.baseStation.autoMode) {
-        enableDisableResponse = await api.enableAutoFlow(payload);
-      } else {
-        enableDisableResponse = await api.disableAutoFlow();
-      }
+      const saveResponse = await api.saveAutoFlowConfig(payload);
 
       const backendSnapshot = await api.getAutoFlowConfig().catch(() => null);
       const normalizedConfig = normalizeSavedConfig(
-        backendSnapshot ?? enableDisableResponse ?? { enabled: config.baseStation.autoMode, config: payload }
+        backendSnapshot ?? saveResponse ?? payload
       );
 
       setAutoFlowPromptDismissed(false);
@@ -661,7 +657,7 @@ export const ConfigurationScreen: React.FC = () => {
                   <div className="space-y-3">
                     <Slider
                       id="survey-duration"
-                      min={0} max={600} step={10}
+                      min={1} max={600} step={1}
                       value={[config.baseStation.surveyDuration]}
                       onValueChange={([value]) => updateDraftConfig((prev) => ({ ...prev, baseStation: { ...prev.baseStation, surveyDuration: value } }))}
                     />
@@ -675,8 +671,7 @@ export const ConfigurationScreen: React.FC = () => {
                         }}
                         onBlur={(e) => {
                           let v = parseInt(e.target.value);
-                          if (isNaN(v) || v < 0) v = 0;
-                          if (v > 600) v = 600;
+                          if (isNaN(v) || v < 1) v = 1;
                           updateDraftConfig((prev) => ({ ...prev, baseStation: { ...prev.baseStation, surveyDuration: v } }));
                         }}
                         className={`${inputClasses} pr-10 font-mono text-sm text-center`}
@@ -796,12 +791,12 @@ export const ConfigurationScreen: React.FC = () => {
                   {streams.ntrip.active && (
                     <div className="grid grid-cols-2 gap-3 p-3 rounded-xl bg-emerald-50 dark:bg-emerald-500/10 border border-emerald-200 dark:border-emerald-500/20 animate-in fade-in">
                       <div>
-                        <div className="text-[10px] font-semibold text-emerald-700 dark:text-emerald-500 uppercase tracking-wider mb-0.5">Data Rate</div>
-                        <div className="text-base font-bold font-mono text-emerald-900 dark:text-emerald-400">{(streams.ntrip.throughput / 1024).toFixed(2)} <span className="text-[10px] font-medium">KB/s</span></div>
+                        <div className="text-[10px] font-semibold text-emerald-700 dark:text-emerald-500 uppercase tracking-wider mb-0.5">Bytes Sent</div>
+                        <div className="text-base font-bold font-mono text-emerald-900 dark:text-emerald-400">{streams.ntrip.dataSent} <span className="text-[10px] font-medium">B</span></div>
                       </div>
                       <div>
-                        <div className="text-[10px] font-semibold text-emerald-700 dark:text-emerald-500 uppercase tracking-wider mb-0.5">Total Sent</div>
-                        <div className="text-base font-bold font-mono text-emerald-900 dark:text-emerald-400">{(streams.ntrip.dataSent / 1024).toFixed(1)} <span className="text-[10px] font-medium">KB</span></div>
+                        <div className="text-[10px] font-semibold text-emerald-700 dark:text-emerald-500 uppercase tracking-wider mb-0.5">Bytes Recv</div>
+                        <div className="text-base font-bold font-mono text-emerald-900 dark:text-emerald-400">{streams.ntrip.dataReceived} <span className="text-[10px] font-medium">B</span></div>
                       </div>
                       <div>
                         <div className="text-[10px] font-semibold text-emerald-700 dark:text-emerald-500 uppercase tracking-wider mb-0.5">Uptime</div>

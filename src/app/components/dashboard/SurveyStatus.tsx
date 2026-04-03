@@ -539,7 +539,7 @@ export const SurveyStatus: React.FC = () => {
   const [displayElapsedTime, setDisplayElapsedTime] = useState(0);
   const prevIsActiveRef = useRef(survey.isActive);
   const prevStatusRef = useRef(survey.status);
-  const startToastIdRef = useRef<string | number | null>(null);
+  const startToastIdRef = useRef<string>('survey-start-loading');
   const [progressPercentage, setProgressPercentage] = useState(0);
   const hasMetTargetAccuracy = survey.valid || (survey.currentAccuracy > 0 && survey.currentAccuracy <= survey.targetAccuracy);
   const showFixedIndicators = !survey.isActive && survey.status !== 'stopped' && hasMetTargetAccuracy;
@@ -573,33 +573,24 @@ export const SurveyStatus: React.FC = () => {
     const justFailed = prevStatus !== 'failed' && survey.status === 'failed';
 
     if (justEnteredInitializing) {
-      if (startToastIdRef.current !== null) {
-        toast.dismiss(startToastIdRef.current);
-      }
-      startToastIdRef.current = toast.loading('Starting survey...');
+      toast.dismiss(startToastIdRef.current);
+      toast.loading('Starting survey...', { id: startToastIdRef.current });
     }
 
     if (becameRunning) {
-      if (startToastIdRef.current !== null) {
-        toast.dismiss(startToastIdRef.current);
-        startToastIdRef.current = null;
-      }
+      toast.dismiss(startToastIdRef.current);
       uiLogger.log('Survey Started Successfully', 'SurveyStatus');
       toast.success('Survey started');
       setIsLoading(false);
     }
 
     if (justFailed) {
-      if (startToastIdRef.current !== null) {
-        toast.dismiss(startToastIdRef.current);
-        startToastIdRef.current = null;
-      }
+      toast.dismiss(startToastIdRef.current);
       setIsLoading(false);
     }
 
-    if (!survey.isActive && survey.status !== 'initializing' && startToastIdRef.current !== null && prevStatus === 'initializing') {
+    if (!survey.isActive && survey.status !== 'initializing' && prevStatus === 'initializing') {
       toast.dismiss(startToastIdRef.current);
-      startToastIdRef.current = null;
     }
 
     prevStatusRef.current = survey.status;
@@ -686,10 +677,7 @@ export const SurveyStatus: React.FC = () => {
       await startSurvey();
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
-      if (startToastIdRef.current !== null) {
-        toast.dismiss(startToastIdRef.current);
-        startToastIdRef.current = null;
-      }
+      toast.dismiss(startToastIdRef.current);
       uiLogger.log('Start Survey Failed', 'SurveyStatus', undefined, errorMsg);
       toast.error(`Failed to start survey: ${errorMsg}`);
       setIsLoading(false);
@@ -746,14 +734,11 @@ export const SurveyStatus: React.FC = () => {
     }
   }, [survey.isActive, survey.currentAccuracy, clampedElapsedTime]);
 
-  const statusAccuracyCm = gnssStatus.globalPosition.horizontalAccuracy > 0
-    ? gnssStatus.globalPosition.horizontalAccuracy * 100
-    : 0;
-  const displayAccuracy = statusAccuracyCm > 0
-    ? statusAccuracyCm
+  const displayAccuracy = survey.currentAccuracy > 0
+    ? survey.currentAccuracy
     : !survey.isActive && lockedAccuracy.current > 0
     ? lockedAccuracy.current
-    : survey.currentAccuracy;
+    : 0;
   const displaySatelliteCount = survey.satelliteCount > 0
     ? survey.satelliteCount
     : gnssStatus.satellites.length > 0

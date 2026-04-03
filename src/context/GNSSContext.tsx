@@ -79,6 +79,7 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const stoppingRef = useRef(false);
   const intentionalDisconnectRef = useRef(false);
   const startPendingRef = useRef(false);
+  const lastNtripSampleRef = useRef<{ bytesSent: number; at: number } | null>(null);
   const startInitiatedAtRef = useRef(0);
   const inactiveSurveyReportsRef = useRef(0);
   const lastSurveyActiveAtRef = useRef(0);
@@ -134,7 +135,7 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
   });
   const DEFAULT_STREAMS: StreamState = {
     serial: { ...defaultStream },
-    ntrip: { ...defaultStream, mountpoint: "", uptime: 0, dataSent: 0, lastError: null },
+    ntrip: { ...defaultStream, mountpoint: "", uptime: 0, dataSent: 0, dataReceived: 0, lastError: null },
     tcp: { ...defaultStream, connectedClients: 0 },
     udp: { ...defaultStream },
   };
@@ -449,7 +450,7 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
           serial: { ...DEFAULT_STREAMS.serial, ...parsed.serial },
           ntrip: isNtripUserArmed
             ? { ...DEFAULT_STREAMS.ntrip, ...parsed.ntrip }
-            : { ...DEFAULT_STREAMS.ntrip, enabled: false, active: false, throughput: 0, uptime: 0, dataSent: 0 },
+            : { ...DEFAULT_STREAMS.ntrip, enabled: false, active: false, throughput: 0, uptime: 0, dataSent: 0, dataReceived: 0 },
           tcp: { ...DEFAULT_STREAMS.tcp, ...parsed.tcp },
           udp: { ...DEFAULT_STREAMS.udp, ...parsed.udp },
         });
@@ -562,7 +563,11 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
       api.getAutoFlowStatus()
         .then((status) => {
-          const stage = typeof status.stage === 'string' ? status.stage.toLowerCase() : '';
+          const stage = typeof status.state === 'string'
+            ? status.state.toLowerCase()
+            : typeof status.stage === 'string'
+            ? status.stage.toLowerCase()
+            : '';
           const isRunningStage = !['', 'idle', 'disabled', 'stopped', 'completed', 'complete'].includes(stage);
           setIsAutoFlowActive(Boolean(status.enabled) && isRunningStage);
         })
@@ -1121,7 +1126,7 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setIsNtripUserArmed(false);
       setStreams((prev) => ({
         ...prev,
-        ntrip: { ...prev.ntrip, enabled: false, active: false, throughput: 0, uptime: 0, dataSent: 0 },
+        ntrip: { ...prev.ntrip, enabled: false, active: false, throughput: 0, uptime: 0, dataSent: 0, dataReceived: 0 },
       }));
       await api.stopNTRIP();
       addLog('info', 'NTRIP stopped successfully');
@@ -1138,18 +1143,18 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (!connection.isConnected) return;
 
       try {
-        const surveyStatus = await api.getSurveyStatus();
+        const surveyStatus = await api.getStatusSurvey();
         if (startPendingRef.current && startupPollLogCountRef.current < 8) {
           startupPollLogCountRef.current += 1;
           addLog(
             'info',
-            `Poll survey update ${startupPollLogCountRef.current}: active=${String(surveyStatus?.active ?? false)}, progress=${String(surveyStatus?.progress_seconds ?? 'null')}, accuracy_m=${String(surveyStatus?.accuracy_m ?? 'null')}`
+            `Poll survey update ${startupPollLogCountRef.current}: active=${String(surveyStatus?.active ?? false)}, progress=${String(surveyStatus?.progress ?? 'null')}, accuracy=${String(surveyStatus?.accuracy ?? 'null')}`
           );
         }
         if (surveyStatus && !stoppingRef.current) {
           setSurvey((prev) => {
-            const pollAccuracy = (surveyStatus.accuracy_m ?? 0) * 100;
-            const pollElapsed = surveyStatus.progress_seconds ?? prev.elapsedTime;
+            const pollAccuracy = (surveyStatus.accuracy ?? 0) * 100;
+            const pollElapsed = surveyStatus.observation_time ?? prev.elapsedTime;
             const pollActive = surveyStatus.active ?? prev.isActive;
             const pollValid = surveyStatus.valid ?? false;
             const nextActiveElapsed = Math.max(prev.elapsedTime, pollElapsed);
@@ -1163,10 +1168,10 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
             const pos = surveyStatus.position || surveyStatus.local_position || {};
             
             const pollLocalCoords = {
-              meanX: preserveCoordinate(parseVal(surveyStatus.mean_x_m ?? surveyStatus.meanX ?? surveyStatus.ecef_x ?? surveyStatus.x ?? pos.x ?? pos[0]), prev.localCoordinates.meanX),
-              meanY: preserveCoordinate(parseVal(surveyStatus.mean_y_m ?? surveyStatus.meanY ?? surveyStatus.ecef_y ?? surveyStatus.y ?? pos.y ?? pos[1]), prev.localCoordinates.meanY),
-              meanZ: preserveCoordinate(parseVal(surveyStatus.mean_z_m ?? surveyStatus.meanZ ?? surveyStatus.ecef_z ?? surveyStatus.z ?? pos.z ?? pos[2]), prev.localCoordinates.meanZ),
-              observations: preserveCount(surveyStatus.observations, prev.localCoordinates.observations),
+              meanX: preserveCoordinate(parseVal(surveyStatus.ecef_x ?? surveyStatus.mean_x_m ?? surveyStatus.meanX ?? surveyStatus.x ?? pos.x ?? pos[0]), prev.localCoordinates.meanX),
+              meanY: preserveCoordinate(parseVal(surveyStatus.ecef_y ?? surveyStatus.mean_y_m ?? surveyStatus.meanY ?? surveyStatus.y ?? pos.y ?? pos[1]), prev.localCoordinates.meanY),
+              meanZ: preserveCoordinate(parseVal(surveyStatus.ecef_z ?? surveyStatus.mean_z_m ?? surveyStatus.meanZ ?? surveyStatus.z ?? pos.z ?? pos[2]), prev.localCoordinates.meanZ),
+              observations: preserveCount(surveyStatus.observation_time, prev.localCoordinates.observations),
             };
 
             if (pollActive) {
@@ -1223,13 +1228,15 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
               elapsedTime: pollActive
                 ? nextActiveElapsed
                 : Math.max(pollElapsed, prev.elapsedTime),
-              progress: pollActive
+              progress: Number.isFinite(Number(surveyStatus.progress))
+                ? Math.min(Number(surveyStatus.progress) / 100, 1)
+                : pollActive
                 ? Math.min(nextActiveElapsed / Math.max(prev.requiredTime, 1), 1)
                 : 1,
               currentAccuracy: pollAccuracy > 0 ? pollAccuracy : prev.currentAccuracy,
               isActive: pollActive,
               localCoordinates: pollLocalCoords,
-              status: pollActive ? "in-progress" : (prev.isActive && !pollActive ? "completed" : prev.status),
+              status: pollActive || surveyStatus.in_progress ? "in-progress" : (prev.isActive && !pollActive ? "completed" : prev.status),
               valid: pollValid || prev.valid,
             };
           });
@@ -1240,7 +1247,64 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }, survey.isActive || survey.status === "initializing" ? 2000 : 5000);
 
     return () => clearInterval(pollInterval);
-  }, [survey.isActive, survey.status, connection.isConnected, syncConfigurationFromBackend]);
+  }, [survey.isActive, survey.status, connection.isConnected]);
+
+  /* ================= POSITION STATUS POLL ================= */
+  useEffect(() => {
+    const pollInterval = setInterval(async () => {
+      if (!connection.isConnected) return;
+
+      try {
+        const positionStatus = await api.getStatusPosition();
+        if (!positionStatus) return;
+
+        const satelliteCount = Number(positionStatus.num_satellites ?? 0);
+        const horizontalAccuracyM = Number(positionStatus.accuracy ?? 0);
+
+        setGNSSStatus((prev) => ({
+          ...prev,
+          satellites: satelliteCount > 0
+            ? Array.from({ length: satelliteCount }, (_, i) => ({
+                id: i,
+                constellation: "GPS",
+                elevation: 0,
+                azimuth: 0,
+                snr: 0,
+                used: true,
+              }))
+            : prev.satellites,
+          fixType: positionStatus.fix_type_str ?? prev.fixType,
+          dop: {
+            ...prev.dop,
+            pdop: preserveOptionalNumber(positionStatus.pdop, prev.dop.pdop),
+          },
+          lastUpdate: new Date(),
+          globalPosition: {
+            latitude: preserveCoordinate(positionStatus.latitude, prev.globalPosition.latitude),
+            longitude: preserveCoordinate(positionStatus.longitude, prev.globalPosition.longitude),
+            altitude: preserveCoordinate(positionStatus.altitude, prev.globalPosition.altitude),
+            horizontalAccuracy: preserveCount(horizontalAccuracyM, prev.globalPosition.horizontalAccuracy),
+          },
+        }));
+
+        setSurvey((prev) => ({
+          ...prev,
+          satelliteCount: preserveCount(satelliteCount, prev.satelliteCount),
+          position: {
+            ...prev.position,
+            latitude: preserveCoordinate(positionStatus.latitude, prev.position.latitude),
+            longitude: preserveCoordinate(positionStatus.longitude, prev.position.longitude),
+            altitude: preserveCoordinate(positionStatus.altitude, prev.position.altitude),
+            accuracy: horizontalAccuracyM > 0 ? horizontalAccuracyM : prev.position.accuracy,
+          },
+        }));
+      } catch (e) {
+        console.warn("Position status poll failed:", e);
+      }
+    }, 2000);
+
+    return () => clearInterval(pollInterval);
+  }, [connection.isConnected]);
 
   /* ================= UNIFIED SURVEY LIFECYCLE WATCHER ================= */
   const prevIsActive = useRef(survey.isActive);
@@ -1314,17 +1378,37 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
       try {
         const ntripStatus = await api.getNTRIP();
         if (ntripStatus) {
+          const nextBytesSent = Number(ntripStatus.bytes_sent ?? 0);
+          const nextUptime = Number(ntripStatus.uptime ?? 0);
+          const now = Date.now();
+          const previousSample = lastNtripSampleRef.current;
+
+          let computedThroughput = 0;
+          if (
+            previousSample &&
+            nextBytesSent >= previousSample.bytesSent &&
+            now > previousSample.at
+          ) {
+            const elapsedSeconds = (now - previousSample.at) / 1000;
+            if (elapsedSeconds > 0) {
+              computedThroughput = (nextBytesSent - previousSample.bytesSent) / elapsedSeconds;
+            }
+          }
+
+          lastNtripSampleRef.current = { bytesSent: nextBytesSent, at: now };
+
           setStreams((prev) => ({
             ...prev,
             ntrip: {
               ...prev.ntrip,
               enabled: ntripStatus.enabled ?? false,
               active: ntripStatus.connected ?? false,
-              throughput: ntripStatus.data_rate_bps ?? 0,
+              throughput: computedThroughput,
               mountpoint: ntripStatus.mountpoint ?? prev.ntrip.mountpoint,
-              uptime: ntripStatus.uptime_seconds ?? 0,
-              dataSent: ntripStatus.bytes_sent ?? 0,
-              lastError: null,
+              uptime: nextUptime,
+              dataSent: nextBytesSent,
+              dataReceived: Number(ntripStatus.bytes_received ?? prev.ntrip.dataReceived ?? 0),
+              lastError: ntripStatus.error_message ?? null,
             },
           }));
         }
