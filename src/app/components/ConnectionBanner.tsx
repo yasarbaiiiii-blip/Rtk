@@ -4,7 +4,7 @@ import { Badge } from './ui/badge';
 import { Wifi, Bluetooth, WifiOff, Signal } from 'lucide-react';
 
 export const ConnectionBanner: React.FC = () => {
-  const { connection } = useGNSS();
+  const { connection, isOfflinePreview } = useGNSS();
 
   const getSignalBars = (strength: number) => {
     if (strength === 0) return 0;
@@ -21,11 +21,14 @@ export const ConnectionBanner: React.FC = () => {
 
   const getStatusText = () => {
     if (!connection.isConnected) return 'Disconnected';
-    return 'Connected';
+    return isOfflinePreview ? 'Offline Preview' : 'Connected';
   };
 
   const getConnectionIcon = () => {
     if (!connection.isConnected) {
+      return <WifiOff className="size-4" />;
+    }
+    if (connection.connectionType === 'offline') {
       return <WifiOff className="size-4" />;
     }
     return connection.connectionType === 'wifi' ? (

@@ -239,6 +239,11 @@ export const ConfigurationScreen: React.FC = () => {
 
   const normalizeSavedConfig = (saved: any) => {
     const backendConfig = saved?.config ?? {};
+    const savedPassword = typeof backendConfig.ntrip_password === 'string'
+      ? backendConfig.ntrip_password
+      : undefined;
+    const hasMaskedPassword = typeof savedPassword === 'string' && /^\*+$/.test(savedPassword);
+
     return {
       ...config,
       baseStation: {
@@ -264,8 +269,8 @@ export const ConfigurationScreen: React.FC = () => {
           mountpoint: typeof backendConfig.ntrip_mountpoint === 'string' && backendConfig.ntrip_mountpoint.length > 0
             ? backendConfig.ntrip_mountpoint
             : config.streams.ntrip.mountpoint,
-          password: typeof backendConfig.ntrip_password === 'string' && backendConfig.ntrip_password.length > 0
-            ? backendConfig.ntrip_password
+          password: typeof savedPassword === 'string' && savedPassword.length > 0 && !hasMaskedPassword
+            ? savedPassword
             : config.streams.ntrip.password,
           username: typeof backendConfig.ntrip_username === 'string'
             ? backendConfig.ntrip_username

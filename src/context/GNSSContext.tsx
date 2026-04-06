@@ -33,6 +33,9 @@ import { stealthPing, validateManualIP } from "../utils/ipDiscovery";
 
 type GNSSContextType = {
   connection: ConnectionState;
+  isOfflinePreview: boolean;
+  enterOfflinePreview: () => void;
+  exitOfflinePreview: () => void;
   connectToDevice: (type: "wifi" | "ble" | "auto", identifier: string, password?: string, wsUrl?: string) => Promise<void>;
   disconnect: () => void;
   survey: SurveyState;
@@ -98,6 +101,7 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
     settings: 'gnss_settings',
     lastWs: 'gnss_last_ws',
     ntripArmed: 'gnss_ntrip_user_armed',
+    offlinePreview: 'gnss_offline_preview',
   } as const;
 
   const defaultStream = { enabled: false, active: false, throughput: 0, messageRate: 0 };
@@ -143,6 +147,13 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
   /* ================= STATE ================= */
 
   const [connection, setConnection] = useState<ConnectionState>(DEFAULT_CONNECTION);
+  const [isOfflinePreview, setIsOfflinePreview] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(STORAGE_KEYS.offlinePreview) === '1';
+    } catch {
+      return false;
+    }
+  });
 
   const [survey, setSurvey] = useState<SurveyState>(DEFAULT_SURVEY);
 
@@ -376,6 +387,9 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
     );
     const nextPort = readNumber("ntrip_port", "ntripPort");
     const nextAutoMode = readBoolean("enabled", "auto_mode", "autoMode");
+    const nextNtripPassword = readString("ntrip_password", "ntripPassword");
+    const hasMaskedNtripPassword =
+      typeof nextNtripPassword === "string" && /^\*+$/.test(nextNtripPassword);
 
     setConfiguration((prev) => {
       const next: Configuration = {
@@ -398,7 +412,9 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
             server: readString("ntrip_host", "ntripHost") || prev.streams.ntrip.server,
             port: Number.isFinite(nextPort) && nextPort > 0 ? nextPort : prev.streams.ntrip.port,
             mountpoint: readString("ntrip_mountpoint", "ntripMountpoint") ?? prev.streams.ntrip.mountpoint,
-            password: readString("ntrip_password", "ntripPassword") ?? prev.streams.ntrip.password,
+            password: typeof nextNtripPassword === "string" && nextNtripPassword.length > 0 && !hasMaskedNtripPassword
+              ? nextNtripPassword
+              : prev.streams.ntrip.password,
             username: readString("ntrip_username", "ntripUsername") ?? prev.streams.ntrip.username,
           },
         },
@@ -542,6 +558,10 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   useEffect(() => {
     const syncAutoFlowConfig = () => {
+      if (isOfflinePreview) {
+        return;
+      }
+
       api.getAutoFlowConfig()
         .then((cfg) => {
           syncConfigurationFromBackend(cfg);
@@ -552,10 +572,15 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
     syncAutoFlowConfig();
     const interval = setInterval(syncAutoFlowConfig, 5000);
     return () => clearInterval(interval);
-  }, [syncConfigurationFromBackend]);
+  }, [isOfflinePreview, syncConfigurationFromBackend]);
 
   useEffect(() => {
     const syncAutoFlowStatus = () => {
+      if (isOfflinePreview) {
+        setIsAutoFlowActive(false);
+        return;
+      }
+
       if (!connection.isConnected) {
         setIsAutoFlowActive(false);
         return;
@@ -577,11 +602,69 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
     syncAutoFlowStatus();
     const interval = setInterval(syncAutoFlowStatus, 2000);
     return () => clearInterval(interval);
-  }, [connection.isConnected]);
+  }, [connection.isConnected, isOfflinePreview]);
 
   const addLog = useCallback((level: 'error' | 'warning' | 'info', message: string) => {
     setLogs((prev) => [{ id: Date.now().toString() + Math.random(), timestamp: new Date(), level, message }, ...prev].slice(0, 500));
   }, []);
+
+  const persistOfflinePreview = useCallback((enabled: boolean) => {
+    try {
+      localStorage.setItem(STORAGE_KEYS.offlinePreview, enabled ? '1' : '0');
+    } catch (error) {
+      console.warn('Failed to persist offline preview state:', error);
+    }
+  }, []);
+
+  const enterOfflinePreview = useCallback(() => {
+    intentionalDisconnectRef.current = true;
+    stoppingRef.current = false;
+    startPendingRef.current = false;
+    inactiveSurveyReportsRef.current = 0;
+    wsRef.current?.close();
+    wsRef.current = null;
+    activeWsUrlRef.current = null;
+    setIsOfflinePreview(true);
+    persistOfflinePreview(true);
+    setConnection((prev) => ({
+      ...prev,
+      connectionType: 'offline',
+      isConnected: true,
+      lastConnectedTimestamp: new Date(),
+      signalStrength: 0,
+      latency: 0,
+    }));
+    addLog('info', 'Offline preview enabled');
+  }, [addLog, persistOfflinePreview]);
+
+  const exitOfflinePreview = useCallback(() => {
+    intentionalDisconnectRef.current = false;
+    setIsOfflinePreview(false);
+    persistOfflinePreview(false);
+    setConnection((prev) => ({
+      ...prev,
+      connectionType: 'none',
+      isConnected: false,
+      signalStrength: 0,
+      latency: 0,
+    }));
+    setSurvey((prev) => ({ ...prev, isActive: false, status: 'idle' }));
+    setIsAutoFlowActive(false);
+    addLog('info', 'Offline preview disabled');
+  }, [addLog, persistOfflinePreview]);
+
+  useEffect(() => {
+    if (!isOfflinePreview) return;
+
+    setConnection((prev) => ({
+      ...prev,
+      connectionType: 'offline',
+      isConnected: true,
+      lastConnectedTimestamp: prev.lastConnectedTimestamp ?? new Date(),
+      signalStrength: 0,
+      latency: 0,
+    }));
+  }, [isOfflinePreview]);
 
   const clearSurveyHistory = useCallback(() => {
     setSurveyHistory([]);
@@ -601,6 +684,11 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
   /* ================= WEBSOCKET ================= */
 
   const connectWebSocket = useCallback((customUrl?: string) => {
+    if (isOfflinePreview) {
+      addLog('info', 'Skipping WebSocket connection in offline preview');
+      return;
+    }
+
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
     const nextWsUrl = customUrl ?? activeWsUrlRef.current ?? lastSavedWsUrl;
@@ -829,7 +917,7 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
         setConnection((prev) => ({ ...prev, isConnected: false }));
       }
     };
-  }, [addLog, lastSavedWsUrl, syncConfigurationFromBackend]);
+  }, [addLog, isOfflinePreview, lastSavedWsUrl, syncConfigurationFromBackend]);
 
   useEffect(() => {
     if (!survey.isActive) return;
@@ -862,6 +950,10 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, [survey.isActive]);
 
   useEffect(() => {
+    if (isOfflinePreview) {
+      return;
+    }
+
     const reconnectTimer = setInterval(() => {
       const wsDown = wsRef.current?.readyState !== WebSocket.OPEN;
       const surveyInactive = !survey.isActive;
@@ -873,10 +965,15 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }, 5000);
 
     return () => clearInterval(reconnectTimer);
-  }, [connectWebSocket, survey.isActive, connection.isConnected]);
+  }, [connectWebSocket, survey.isActive, connection.isConnected, isOfflinePreview]);
 
   /* ================= START SURVEY ================= */
   const startSurvey = useCallback(async () => {
+    if (isOfflinePreview) {
+      toast.info('Offline preview mode does not start hardware survey');
+      return;
+    }
+
     try {
       const currentDuration = configuration.baseStation.surveyDuration;
       const currentAccuracy = configuration.baseStation.accuracyThreshold;
@@ -926,10 +1023,16 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setSurvey((prev) => ({ ...prev, isActive: false, status: "failed" }));
       throw error;
     }
-  }, [configuration.baseStation.surveyDuration, configuration.baseStation.accuracyThreshold, addLog, getAutoFlowPayload]);
+  }, [configuration.baseStation.surveyDuration, configuration.baseStation.accuracyThreshold, addLog, getAutoFlowPayload, isOfflinePreview]);
 
   /* ================= STOP SURVEY ================= */
   const stopSurvey = useCallback(async () => {
+    if (isOfflinePreview) {
+      setSurvey((prev) => ({ ...prev, isActive: false, status: 'stopped' }));
+      toast.info('Offline preview mode has no active hardware survey to stop');
+      return;
+    }
+
     try {
       addLog('info', 'Stopping Auto Flow');
       stoppingRef.current = true;
@@ -963,11 +1066,16 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
         stoppingRef.current = false;
       }, 1000);
     }
-  }, [addLog]);
+  }, [addLog, isOfflinePreview]);
 
 /* ================= CONNECTION FUNCTIONS ================= */
   const connectToDevice = useCallback(async (type: "wifi" | "ble" | "auto", identifier: string, password?: string, wsUrl?: string) => {
     try {
+      if (isOfflinePreview) {
+        setIsOfflinePreview(false);
+        persistOfflinePreview(false);
+      }
+
       let finalWsUrl = wsUrl;
 
       if (type === 'auto') {
@@ -1025,10 +1133,15 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
       addLog('error', `Connection failed: ${String(error)}`);
       throw error;
     }
-  }, [connectWebSocket, lastSavedWsUrl, addLog]);
+  }, [connectWebSocket, isOfflinePreview, lastSavedWsUrl, addLog, persistOfflinePreview]);
 
   // ⭐ THE MISSING DISCONNECT FUNCTION
   const disconnect = useCallback(() => {
+    if (isOfflinePreview) {
+      exitOfflinePreview();
+      return;
+    }
+
     intentionalDisconnectRef.current = true;
     stoppingRef.current = false;
     startPendingRef.current = false;
@@ -1038,17 +1151,30 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
     wsRef.current?.close();
     setConnection(prev => ({ ...prev, isConnected: false, connectionType: 'none' })); // Force UI reset
     addLog('info', 'Disconnected from device');
-  }, [addLog]);
+  }, [addLog, exitOfflinePreview, isOfflinePreview]);
 
   /* ================= STREAM FUNCTIONS ================= */
   const toggleStream = useCallback(async (key: keyof StreamState, enabled: boolean) => {
     try {
+      if (isOfflinePreview) {
+        setStreams((prev) => ({
+          ...prev,
+          [key]: {
+            ...prev[key],
+            enabled,
+            active: false,
+          },
+        }));
+        addLog('info', `Updated ${key} stream in offline preview`);
+        return;
+      }
+
       addLog('info', `${enabled ? 'Enabling' : 'Disabling'} ${key} stream`);
     } catch (error) {
       addLog('error', `Stream toggle failed: ${String(error)}`);
       throw error;
     }
-  }, [addLog]);
+  }, [addLog, isOfflinePreview]);
 
   /* ================= SCAN FUNCTIONS ================= */
   const scanWiFi = useCallback(async () => {
@@ -1097,6 +1223,15 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
   /* ================= NTRIP FUNCTIONS ================= */
   const startNTRIP = useCallback(async (host: string, port: number, mountpoint: string, password: string, username?: string) => {
     try {
+      if (isOfflinePreview) {
+        setStreams((prev) => ({
+          ...prev,
+          ntrip: { ...prev.ntrip, enabled: true, active: false, mountpoint },
+        }));
+        toast.info('Offline preview mode does not connect to NTRIP');
+        return;
+      }
+
       addLog('info', `Starting NTRIP: ${host}:${port}/${mountpoint}`);
       setStreams((prev) => ({
         ...prev,
@@ -1118,10 +1253,19 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
       addLog('error', `NTRIP start failed: ${String(error)}`);
       throw error;
     }
-  }, [addLog]);
+  }, [addLog, isOfflinePreview]);
 
   const stopNTRIP = useCallback(async () => {
     try {
+      if (isOfflinePreview) {
+        setStreams((prev) => ({
+          ...prev,
+          ntrip: { ...prev.ntrip, enabled: false, active: false, throughput: 0, uptime: 0, dataSent: 0, dataReceived: 0 },
+        }));
+        toast.info('Offline preview mode stopped local NTRIP preview state');
+        return;
+      }
+
       addLog('info', 'Stopping NTRIP');
       setIsNtripUserArmed(false);
       setStreams((prev) => ({
@@ -1135,10 +1279,12 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
       addLog('error', `NTRIP stop failed: ${String(error)}`);
       throw error;
     }
-  }, [addLog]);
+  }, [addLog, isOfflinePreview]);
 
   /* ================= SURVEY STATUS POLL ================= */
   useEffect(() => {
+    if (isOfflinePreview) return;
+
     const pollInterval = setInterval(async () => {
       if (!connection.isConnected) return;
 
@@ -1247,10 +1393,12 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }, survey.isActive || survey.status === "initializing" ? 2000 : 5000);
 
     return () => clearInterval(pollInterval);
-  }, [survey.isActive, survey.status, connection.isConnected]);
+  }, [survey.isActive, survey.status, connection.isConnected, isOfflinePreview]);
 
   /* ================= POSITION STATUS POLL ================= */
   useEffect(() => {
+    if (isOfflinePreview) return;
+
     const pollInterval = setInterval(async () => {
       if (!connection.isConnected) return;
 
@@ -1304,7 +1452,7 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }, 2000);
 
     return () => clearInterval(pollInterval);
-  }, [connection.isConnected]);
+  }, [connection.isConnected, isOfflinePreview]);
 
   /* ================= UNIFIED SURVEY LIFECYCLE WATCHER ================= */
   const prevIsActive = useRef(survey.isActive);
@@ -1373,6 +1521,8 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   /* ================= NTRIP STATUS POLL ================= */
   useEffect(() => {
+    if (isOfflinePreview) return;
+
     const pollInterval = setInterval(async () => {
       if (!connection.isConnected) return;
       try {
@@ -1417,7 +1567,7 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
     }, 2000);
     return () => clearInterval(pollInterval);
-  }, [connection.isConnected]);
+  }, [connection.isConnected, isOfflinePreview]);
 
   /* ================= CONFIG SYNC ================= */
   useEffect(() => {
@@ -1435,6 +1585,9 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const value = useMemo(
     () => ({
       connection,
+      isOfflinePreview,
+      enterOfflinePreview,
+      exitOfflinePreview,
       connectToDevice,
       disconnect,
       survey,
@@ -1464,7 +1617,7 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
       startNTRIP,
       stopNTRIP,
     }),
-    [connection, survey, isAutoFlowActive, gnssStatus, streams, configuration, settings, surveyHistory, logs, connectToDevice, disconnect, startSurvey, stopSurvey, toggleStream, updateConfiguration, updateSettings, scanWiFi, scanBLE, addLog, clearLogs, deleteLogs, clearSurveyHistory, deleteSurveys, exportHistoryCSV, exportLogsCSV, startNTRIP, stopNTRIP]
+    [connection, isOfflinePreview, survey, isAutoFlowActive, gnssStatus, streams, configuration, settings, surveyHistory, logs, enterOfflinePreview, exitOfflinePreview, connectToDevice, disconnect, startSurvey, stopSurvey, toggleStream, updateConfiguration, updateSettings, scanWiFi, scanBLE, addLog, clearLogs, deleteLogs, clearSurveyHistory, deleteSurveys, exportHistoryCSV, exportLogsCSV, startNTRIP, stopNTRIP]
   );
 
   return (

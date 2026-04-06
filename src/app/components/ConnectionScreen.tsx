@@ -7,7 +7,7 @@ import { Badge } from './ui/badge';
 import { 
   RotateCw, Cpu, 
   ChevronRight, Orbit, Lightbulb, Radar, 
-  SearchCode, Terminal, Waves, ShieldCheck, Edit2
+  SearchCode, Terminal, Waves, ShieldCheck, Edit2, Eye
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { getWsUrl } from '../../api/gnssApiDynamic';
@@ -15,7 +15,7 @@ import { deepSweepNetwork } from '../../utils/ipDiscovery';
 import { getCurrentWifiInfo } from '../../native/wifi';
 
 export const ConnectionScreen: React.FC = () => {
-  const { connectToDevice, logs } = useGNSS();
+  const { connectToDevice, enterOfflinePreview, logs } = useGNSS();
   const [connectionMode, setConnectionMode] = useState<'wifi' | 'auto'>('wifi');
   
   // WebSocket Scanner States
@@ -342,6 +342,18 @@ export const ConnectionScreen: React.FC = () => {
                       </Button>
                     </div>
                   )}
+
+                  <div className="pt-3">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={enterOfflinePreview}
+                      className="w-full h-12 rounded-xl border-slate-300 dark:border-slate-700 bg-transparent font-bold uppercase text-[11px] tracking-[0.2em] active:scale-95 transition-all"
+                    >
+                      <Eye className="size-4 mr-2" />
+                      Offline Preview
+                    </Button>
+                  </div>
                 </div>
               )}
 

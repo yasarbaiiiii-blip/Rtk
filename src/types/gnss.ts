@@ -1,6 +1,6 @@
 // GNSS Base Station Type Definitions
 
-export type ConnectionType = 'wifi' | 'ble' | 'none';
+export type ConnectionType = 'wifi' | 'ble' | 'offline' | 'none';
 export type SurveyMode = 'survey-in' | 'fixed';
 export type SurveyStatus =
   | 'idle'

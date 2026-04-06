@@ -320,7 +320,7 @@ import {
 type Screen = 'connection' | 'dashboard' | 'configuration' | 'history' | 'settings';
 
 const AppContent: React.FC = () => {
-  const { connection, disconnect, settings, survey } = useGNSS();
+  const { connection, disconnect, settings, survey, isOfflinePreview } = useGNSS();
   const [currentScreen, setCurrentScreen] = useState<Screen>('connection');
   const [screenHistory, setScreenHistory] = useState<Screen[]>([]);
 
@@ -360,11 +360,15 @@ const AppContent: React.FC = () => {
 
   // ⭐ THE GATEWAY: Strictly force the user back to the connection screen if the link drops
   useEffect(() => {
+    if (isOfflinePreview) {
+      return;
+    }
+
     if (!connection.isConnected && !survey.isActive && currentScreen !== 'connection') {
       setCurrentScreen('connection');
       setScreenHistory([]);
     }
-  }, [connection.isConnected, survey.isActive, currentScreen]);
+  }, [connection.isConnected, survey.isActive, currentScreen, isOfflinePreview]);
 
   // Trigger auto-start survey event when dashboard is shown
   useEffect(() => {
@@ -456,7 +460,7 @@ const AppContent: React.FC = () => {
   };
 
   // If not connected and no active survey, block rendering of the internal app structure
-  if (!connection.isConnected && !survey.isActive) {
+  if (!connection.isConnected && !survey.isActive && !isOfflinePreview) {
     return (
       <div className="min-h-dvh safe-x bg-slate-50 dark:bg-[#020617] text-slate-900 dark:text-slate-50 transition-colors duration-300">
         <div key="connection-screen" className="animate-in fade-in zoom-in-[0.99] duration-200 ease-out">
@@ -519,7 +523,7 @@ const AppContent: React.FC = () => {
               GNSS Base Station
             </h1>
             <p className="text-[10px] font-medium text-slate-500 dark:text-slate-400 uppercase tracking-widest">
-              Connected
+              {isOfflinePreview ? 'Offline Preview' : 'Connected'}
             </p>
           </div>
           
