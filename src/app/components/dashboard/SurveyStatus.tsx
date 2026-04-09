@@ -530,7 +530,20 @@ interface AccuracyRecord {
 }
 
 export const SurveyStatus: React.FC = () => {
-  const { survey, startSurvey, stopSurvey, configuration, gnssStatus, streams, isAutoFlowActive, isAutoFlowSessionActive, autoFlowRuntime, savedBasePosition, fixedBaseReference, confirmResurvey, skipResurvey } = useGNSS();
+  const {
+    survey,
+    startSurvey,
+    stopSurvey,
+    configuration,
+    gnssStatus,
+    streams,
+    isAutoFlowActive,
+    isAutoFlowSessionActive,
+    autoFlowRuntime,
+    savedBasePosition,
+    confirmResurvey,
+    skipResurvey,
+  } = useGNSS();
   const [coordinateFormat, setCoordinateFormat] = useState<'Global' | 'Local'>('Global');
   const [isLoading, setIsLoading] = useState(false);
   const [accuracyHistory, setAccuracyHistory] = useState<AccuracyRecord[]>([]);
@@ -543,67 +556,61 @@ export const SurveyStatus: React.FC = () => {
   const prevStatusRef = useRef(survey.status);
   const startToastIdRef = useRef<string>('survey-start-loading');
   const [progressPercentage, setProgressPercentage] = useState(0);
-  const lastUpdateTimeRef = useRef(Date.now());
-  const smoothTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const surveyStartedAtRef = useRef<number | null>(null);
   const hasMetTargetAccuracy = survey.valid || (survey.currentAccuracy > 0 && survey.currentAccuracy <= survey.targetAccuracy);
   const showFixedIndicators = !survey.isActive && survey.status !== 'stopped' && hasMetTargetAccuracy;
-  const requiredTimeSecs = survey.isActive ? survey.requiredTime : configuration.baseStation.surveyDuration;
-  const isFlowRunning = survey.isActive || survey.status === 'initializing' || isAutoFlowActive || isAutoFlowSessionActive;
+  const hasAutoFlowControl = isAutoFlowActive || isAutoFlowSessionActive;
+  const isStreamingConnected = streams.ntrip.active || (streams.ntrip.enabled && hasAutoFlowControl);
+  const showBaseFixedBanner = Boolean(savedBasePosition) && !autoFlowRuntime.isAwaitingConfirm && !survey.isActive;
+  const shouldShowStopButton = !autoFlowRuntime.isAwaitingConfirm && (
+    survey.isActive ||
+    survey.status === 'initializing' ||
+    hasAutoFlowControl ||
+    isStreamingConnected
+  );
 
-  // Smooth timer update logic
+  const requiredTimeSecs = survey.requiredTime > 0 ? survey.requiredTime : configuration.baseStation.surveyDuration;
+
   useEffect(() => {
-    const justStarted = survey.isActive && !prevIsActiveRef.current;
-    prevIsActiveRef.current = survey.isActive;
-
     if (survey.status === 'initializing') {
       setDisplayElapsedTime(0);
       setSmoothElapsedTime(0);
-      if (smoothTimerRef.current) {
-        clearInterval(smoothTimerRef.current);
-        smoothTimerRef.current = null;
-      }
+      surveyStartedAtRef.current = null;
       return;
     }
 
-    if (survey.isActive || justStarted) {
-      setDisplayElapsedTime(survey.elapsedTime);
-      setSmoothElapsedTime(survey.elapsedTime);
-      lastUpdateTimeRef.current = Date.now();
-      
-      // Start smooth timer if not already running
-      if (!smoothTimerRef.current) {
-        smoothTimerRef.current = setInterval(() => {
-          const now = Date.now();
-          const elapsed = (now - lastUpdateTimeRef.current) / 1000;
-          setSmoothElapsedTime(prev => {
-            const next = prev + elapsed;
-            return Math.min(next, requiredTimeSecs);
-          });
-          lastUpdateTimeRef.current = now;
-        }, 100); // Update every 100ms for smooth display
-      }
-      return;
-    }
+    if (survey.isActive) {
+      const safeElapsed = Math.max(0, Math.floor(survey.elapsedTime));
+      setDisplayElapsedTime(safeElapsed);
 
-    // Survey stopped - clean up smooth timer
-    if (smoothTimerRef.current) {
-      clearInterval(smoothTimerRef.current);
-      smoothTimerRef.current = null;
+      if (surveyStartedAtRef.current === null) {
+        surveyStartedAtRef.current = Date.now() - safeElapsed * 1000;
+      }
+
+      const tick = () => {
+        if (surveyStartedAtRef.current === null) {
+          setSmoothElapsedTime(safeElapsed);
+          return;
+        }
+
+        const runtimeSeconds = Math.floor((Date.now() - surveyStartedAtRef.current) / 1000);
+        setSmoothElapsedTime(Math.min(Math.max(runtimeSeconds, safeElapsed), requiredTimeSecs));
+      };
+
+      tick();
+      const interval = setInterval(tick, 250);
+      return () => clearInterval(interval);
     }
 
     const settledElapsed = Math.min(survey.elapsedTime, requiredTimeSecs);
     setDisplayElapsedTime(settledElapsed);
     setSmoothElapsedTime(settledElapsed);
+    surveyStartedAtRef.current = null;
   }, [survey.elapsedTime, survey.isActive, survey.status, requiredTimeSecs]);
 
-  // Clean up smooth timer on unmount
   useEffect(() => {
-    return () => {
-      if (smoothTimerRef.current) {
-        clearInterval(smoothTimerRef.current);
-      }
-    };
-  }, []);
+    prevIsActiveRef.current = survey.isActive;
+  }, [survey.isActive]);
 
   const clampedElapsedTime = Math.min(smoothElapsedTime, requiredTimeSecs);
 
@@ -677,42 +684,6 @@ export const SurveyStatus: React.FC = () => {
     return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
-  // Coordinate conversion functions
-  const ecefToLlh = (x: number, y: number, z: number) => {
-    // Simplified ECEF to LLH conversion for display purposes
-    const a = 6378137.0; // WGS84 semi-major axis
-    const e2 = 0.00669437999014; // WGS84 eccentricity squared
-    
-    const p = Math.sqrt(x * x + y * y);
-    const theta = Math.atan2(z * a, p * Math.sqrt(1 - e2 * z * z));
-    
-    let lat = Math.atan2(z + e2 * a * Math.pow(Math.sin(theta), 3), 
-                         p - e2 * a * Math.pow(Math.cos(theta), 3));
-    let lon = Math.atan2(y, x);
-    
-    const N = a / Math.sqrt(1 - e2 * Math.sin(lat) * Math.sin(lat));
-    let alt = p / Math.cos(lat) - N;
-    
-    return { lat: lat * 180 / Math.PI, lon: lon * 180 / Math.PI, alt };
-  };
-
-  const llhToEcef = (lat: number, lon: number, alt: number) => {
-    // Simplified LLH to ECEF conversion for display purposes
-    const a = 6378137.0; // WGS84 semi-major axis
-    const e2 = 0.00669437999014; // WGS84 eccentricity squared
-    
-    const latRad = lat * Math.PI / 180;
-    const lonRad = lon * Math.PI / 180;
-    
-    const N = a / Math.sqrt(1 - e2 * Math.sin(latRad) * Math.sin(latRad));
-    
-    const x = (N + alt) * Math.cos(latRad) * Math.cos(lonRad);
-    const y = (N + alt) * Math.cos(latRad) * Math.sin(lonRad);
-    const z = (N * (1 - e2) + alt) * Math.sin(latRad);
-    
-    return { x, y, z };
-  };
-
   const formatCoordinate = () => {
     if (coordinateFormat === 'Global') {
       return {
@@ -722,28 +693,11 @@ export const SurveyStatus: React.FC = () => {
       };
     }
 
-    // For Local format, show converted coordinates from saved position or current position
     if (savedBasePosition) {
       return {
         lat: savedBasePosition.ecef_x.toFixed(4),
         lon: savedBasePosition.ecef_y.toFixed(4),
         alt: savedBasePosition.ecef_z.toFixed(4),
-      };
-    } else if (fixedBaseReference) {
-      // Convert fixed base LLH to ECEF for display consistency
-      const ecef = llhToEcef(fixedBaseReference.llh.latitude, fixedBaseReference.llh.longitude, fixedBaseReference.llh.height_ellipsoid);
-      return {
-        lat: ecef.x.toFixed(4),
-        lon: ecef.y.toFixed(4),
-        alt: ecef.z.toFixed(4),
-      };
-    } else if (gnssStatus.globalPosition.latitude !== 0 && gnssStatus.globalPosition.longitude !== 0) {
-      // Convert current global position to ECEF for display
-      const ecef = llhToEcef(gnssStatus.globalPosition.latitude, gnssStatus.globalPosition.longitude, gnssStatus.globalPosition.altitude);
-      return {
-        lat: ecef.x.toFixed(4),
-        lon: ecef.y.toFixed(4),
-        alt: ecef.z.toFixed(4),
       };
     }
 
@@ -930,7 +884,7 @@ export const SurveyStatus: React.FC = () => {
           </div>
 
           {/* Base is Fixed Status Display */}
-          {savedBasePosition && !isFlowRunning && !autoFlowRuntime.isAwaitingConfirm && (
+          {showBaseFixedBanner && (
             <div className="flex items-center justify-center mt-4 mb-2">
               <div className="flex items-center gap-2 px-4 py-2 bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-800 rounded-full">
                 <CheckCircle2 className="size-4 text-emerald-600 dark:text-emerald-400" />
@@ -1034,7 +988,11 @@ export const SurveyStatus: React.FC = () => {
                   <Square className="size-4" /> Skip Resurvey
                 </Button>
               </>
-            ) : !isFlowRunning ? (
+            ) : shouldShowStopButton ? (
+              <Button onClick={handleStopSurvey} variant="destructive" className="flex-1 gap-2" disabled={isLoading}>
+                <Square className="size-4" /> Stop
+              </Button>
+            ) : !survey.isActive ? (
               <Button
                 onClick={handleStartSurvey}
                 className="flex-1 gap-2 bg-blue-600 hover:bg-blue-700 text-white"
@@ -1124,7 +1082,7 @@ export const SurveyStatus: React.FC = () => {
               <div>
                 <CardTitle className="text-base text-slate-900 dark:text-slate-50 uppercase tracking-wide">Position Data</CardTitle>
                 <CardDescription className="text-[10px] font-mono text-slate-500 dark:text-slate-400 mt-0.5">
-                  {coordinateFormat === 'Global' ? 'GLOBAL_STATUS_POSITION' : 'LOCAL_SAVED_ECEF'}
+                  {coordinateFormat === 'Global' ? 'GLOBAL_GNSS_RX' : 'LOCAL_SURVEY_PROC'}
                 </CardDescription>
               </div>
             </div>

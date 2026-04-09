@@ -90,44 +90,6 @@ export interface GNSSStatus {
   };
 }
 
-export interface FixedBaseReference {
-  mode: string;
-  source: string;
-  fixed_pos_acc: number;
-  rtcm_enabled: boolean;
-  save_to_flash: boolean;
-  timestamp: string;
-  llh: {
-    latitude: number;
-    longitude: number;
-    height_ellipsoid: number;
-  };
-}
-
-export interface BaseReferenceStatus {
-  fixed_reference: FixedBaseReference | null;
-  survey_reference: Record<string, unknown> | null;
-}
-
-export interface SavedBasePosition {
-  ecef_x: number;
-  ecef_y: number;
-  ecef_z: number;
-  accuracy: number;
-  surveyed_at: string;
-}
-
-export interface SavedBasePositionResponse {
-  saved: boolean;
-  position: SavedBasePosition | null;
-}
-
-export interface AutoFlowRuntimeState {
-  stage: string;
-  isAwaitingConfirm: boolean;
-  deadlineAt: Date | null;
-}
-
 /* ================= STREAMS ================= */
 
 export interface StreamInfo {
@@ -146,11 +108,37 @@ export interface NTRIPStream extends StreamInfo {
   lastError: string | null;
 }
 
+export interface RTCMStream extends StreamInfo {
+  msmType: string;
+  activeMessages: string[];
+}
+
 export interface StreamState {
   serial: StreamInfo;
+  rtcm: RTCMStream;
   ntrip: NTRIPStream;
   tcp: StreamInfo & { connectedClients: number };
   udp: StreamInfo;
+}
+
+export interface SavedBasePosition {
+  ecef_x: number;
+  ecef_y: number;
+  ecef_z: number;
+  accuracy: number;
+  surveyed_at?: string;
+}
+
+export interface SavedBasePositionResponse {
+  saved: boolean;
+  position?: SavedBasePosition | null;
+}
+
+export interface AutoFlowRuntimeState {
+  stage: string;
+  isEnabled: boolean;
+  isAwaitingConfirm: boolean;
+  deadlineAt: Date | null;
 }
 
 /* ================= CONFIG ================= */

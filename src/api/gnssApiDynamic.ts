@@ -45,7 +45,9 @@ export const api = {
   getHealth: async () => fetch(`${requireApiBase()}/api/v1/health`).then(handleResponse),
   getStatus: async () => fetch(`${requireApiBase()}/api/v1/status`).then(handleResponse),
   getStatusPosition: async () => fetch(`${requireApiBase()}/api/v1/status/position`).then(handleResponse),
-  getStatusBaseReference: async () => fetch(`${requireApiBase()}/api/v1/status/base-reference`).then(handleResponse),
+  getStatusRTCM: async () => fetch(`${requireApiBase()}/api/v1/status/rtcm`).then(handleResponse),
+  getStatusNTRIP: async () => fetch(`${requireApiBase()}/api/v1/status/ntrip`).then(handleResponse),
+  getStatusSurvey: async () => fetch(`${requireApiBase()}/api/v1/status/survey`).then(handleResponse),
   getSavedBasePosition: async () => fetch(`${requireApiBase()}/api/v1/base/saved-position`).then(handleResponse),
   deleteSavedBasePosition: async (confirm: boolean = true) => {
     const base = requireApiBase();
@@ -68,7 +70,6 @@ export const api = {
       headers: { "Content-Type": "application/json" },
     }).then(handleResponse);
   },
-  getStatusSurvey: async () => fetch(`${requireApiBase()}/api/v1/status/survey`).then(handleResponse),
   getSurvey: async () => fetch(`${requireApiBase()}/api/v1/survey`).then(handleResponse),
   getSurveyStatus: async () => {
     const base = requireApiBase();

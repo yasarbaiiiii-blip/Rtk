@@ -173,6 +173,18 @@ export const StreamStatus: React.FC = () => {
       />
 
       <StreamCard
+        icon={<Radio className="size-5 text-blue-500" />}
+        title="RTCM Output"
+        description="Correction message generation"
+        streamKey="rtcm"
+        streamData={streams.rtcm}
+      >
+        <div className="text-sm">
+          Messages: {streams.rtcm.activeMessages.length > 0 ? streams.rtcm.activeMessages.join(", ") : 'NIL'}
+        </div>
+      </StreamCard>
+
+      <StreamCard
         icon={<Wifi className="size-5 text-blue-500" />}
         title="NTRIP Caster"
         description="Network transport of RTCM corrections"

@@ -145,7 +145,21 @@ const SectionCard: React.FC<{
 
 
 export const ConfigurationScreen: React.FC = () => {
-  const { configuration, updateConfiguration, survey, streams, gnssStatus, startNTRIP, stopNTRIP, isAutoFlowActive, applyFixedBasePosition, fixedBaseReference, savedBasePosition, isFixedBaseDisplayActive, setFixedBaseDisplayActive, deleteSavedPosition } = useGNSS();
+  const {
+    configuration,
+    updateConfiguration,
+    survey,
+    streams,
+    gnssStatus,
+    startNTRIP,
+    stopNTRIP,
+    isAutoFlowActive,
+    savedBasePosition,
+    applyFixedBasePosition,
+    deleteSavedPosition,
+    isFixedBaseDisplayActive,
+    setFixedBaseDisplayActive,
+  } = useGNSS();
   const [config, setConfig] = useState(configuration);
   const [isDirty, setIsDirty] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
@@ -197,6 +211,24 @@ export const ConfigurationScreen: React.FC = () => {
       altitude: alt,
     };
   };
+
+  const llhToEcef = (latitude: number, longitude: number, altitude: number) => {
+    const a = 6378137.0;
+    const e2 = 6.69437999014e-3;
+    const lat = latitude * (Math.PI / 180);
+    const lon = longitude * (Math.PI / 180);
+    const sinLat = Math.sin(lat);
+    const cosLat = Math.cos(lat);
+    const cosLon = Math.cos(lon);
+    const sinLon = Math.sin(lon);
+    const n = a / Math.sqrt(1 - e2 * sinLat * sinLat);
+
+    return {
+      x: (n + altitude) * cosLat * cosLon,
+      y: (n + altitude) * cosLat * sinLon,
+      z: (n * (1 - e2) + altitude) * sinLat,
+    };
+  };
   
   // ⭐ FIX: Changed breakpoint to 768px. Tablets (like iPad) are typically 768px+. 
   // This ensures tablets get the full desktop grid view, and only phones get the clickable modal view.
@@ -208,7 +240,7 @@ export const ConfigurationScreen: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    api.getRTCM()
+    api.getStatusRTCM()
       .then((status) => {
         if (status.msm_type === 'MSM4' || status.msm_type === 'MSM7') {
           setActiveMsgType(status.msm_type);
@@ -345,26 +377,22 @@ export const ConfigurationScreen: React.FC = () => {
   const handleSave = async (): Promise<boolean> => {
     uiLogger.log('Save Configuration clicked', 'ConfigurationScreen', config);
     const payload = getAutoFlowPayload();
-    const shouldApplyFixedBase =
-      config.baseStation.fixedMode.enabled &&
-      (
-        !isFixedBaseDisplayActive ||
-        !fixedBaseReference ||
-        Math.abs(config.baseStation.fixedMode.coordinates.latitude - fixedBaseReference.llh.latitude) > 1e-9 ||
-        Math.abs(config.baseStation.fixedMode.coordinates.longitude - fixedBaseReference.llh.longitude) > 1e-9 ||
-        Math.abs(config.baseStation.fixedMode.coordinates.altitude - fixedBaseReference.llh.height_ellipsoid) > 1e-6 ||
-        Math.abs(config.baseStation.fixedMode.coordinates.accuracy - fixedBaseReference.fixed_pos_acc) > 1e-6
-      );
+    const shouldApplyFixedBase = config.baseStation.fixedMode.enabled;
 
     setIsSaving(true);
     try {
       const saveResponse = await api.saveAutoFlowConfig(payload);
 
       if (shouldApplyFixedBase) {
+        const llh = ecefToLlh(
+          config.baseStation.fixedMode.coordinates.latitude,
+          config.baseStation.fixedMode.coordinates.longitude,
+          config.baseStation.fixedMode.coordinates.altitude
+        );
         await applyFixedBasePosition({
-          latitude: config.baseStation.fixedMode.coordinates.latitude,
-          longitude: config.baseStation.fixedMode.coordinates.longitude,
-          height: config.baseStation.fixedMode.coordinates.altitude,
+          latitude: llh.latitude,
+          longitude: llh.longitude,
+          height: llh.altitude,
           accuracyMeters: config.baseStation.fixedMode.coordinates.accuracy,
           msmType: activeMsgType,
         });
@@ -492,78 +520,8 @@ export const ConfigurationScreen: React.FC = () => {
     return () => clearInterval(interval);
   }, [receiverConfig.active]);
 
-  const loadCurrentSurvey = async () => {
-    const latitude = gnssStatus.globalPosition.latitude || survey.position.latitude;
-    const longitude = gnssStatus.globalPosition.longitude || survey.position.longitude;
-    const altitude = gnssStatus.globalPosition.altitude || survey.position.altitude;
-    const accuracy = gnssStatus.globalPosition.horizontalAccuracy || survey.position.accuracy || config.baseStation.fixedMode.coordinates.accuracy;
-
-    const nextConfig = {
-      ...config,
-      baseStation: {
-        ...config.baseStation,
-        fixedMode: {
-          enabled: true,
-          coordinates: {
-            latitude,
-            longitude,
-            altitude,
-            accuracy,
-          },
-        },
-      },
-    };
-
-    setIsDirty(false);
-    setConfig(nextConfig);
-    updateConfiguration(nextConfig);
-
-    try {
-      await applyFixedBasePosition({
-        latitude,
-        longitude,
-        height: altitude,
-        accuracyMeters: accuracy,
-        msmType: activeMsgType,
-      });
-      toast.success('Loaded current position and applied fixed base');
-    } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : String(error);
-      toast.error(`Failed to apply fixed base: ${errorMsg}`);
-    }
-  };
-
   useEffect(() => {
-    if (isDirty) {
-      return;
-    }
-
-    if (savedBasePosition) {
-      const llh = ecefToLlh(
-        savedBasePosition.ecef_x,
-        savedBasePosition.ecef_y,
-        savedBasePosition.ecef_z
-      );
-
-      setConfig((prev) => ({
-        ...prev,
-        baseStation: {
-          ...prev.baseStation,
-          fixedMode: {
-            enabled: true,
-            coordinates: {
-              latitude: llh.latitude,
-              longitude: llh.longitude,
-              altitude: llh.altitude,
-              accuracy: savedBasePosition.accuracy,
-            },
-          },
-        },
-      }));
-      return;
-    }
-
-    if (!fixedBaseReference) {
+    if (isDirty || !savedBasePosition) {
       return;
     }
 
@@ -574,69 +532,15 @@ export const ConfigurationScreen: React.FC = () => {
         fixedMode: {
           enabled: true,
           coordinates: {
-            latitude: fixedBaseReference.llh.latitude,
-            longitude: fixedBaseReference.llh.longitude,
-            altitude: fixedBaseReference.llh.height_ellipsoid,
-            accuracy: fixedBaseReference.fixed_pos_acc,
+            latitude: savedBasePosition.ecef_x,
+            longitude: savedBasePosition.ecef_y,
+            altitude: savedBasePosition.ecef_z,
+            accuracy: savedBasePosition.accuracy,
           },
         },
       },
     }));
-  }, [fixedBaseReference, isDirty, savedBasePosition]);
-
-  
-  const syncFixedCoordinatesFromSaved = () => {
-    if (savedBasePosition && !isDirty) {
-      const llh = ecefToLlh(savedBasePosition.ecef_x, savedBasePosition.ecef_y, savedBasePosition.ecef_z);
-      setConfig((prev) => ({
-        ...prev,
-        baseStation: {
-          ...prev.baseStation,
-          fixedMode: {
-            ...prev.baseStation.fixedMode,
-            coordinates: {
-              latitude: llh.latitude,
-              longitude: llh.longitude,
-              altitude: llh.altitude,
-              accuracy: savedBasePosition.accuracy,
-            },
-          },
-        },
-      }));
-    }
-  };
-
-  // Sync coordinates when saved position changes
-  useEffect(() => {
-    syncFixedCoordinatesFromSaved();
-  }, [savedBasePosition]);
-
-  const handleDeleteFixedPosition = async () => {
-    try {
-      await deleteSavedPosition();
-      const clearedConfig = {
-        ...config,
-        baseStation: {
-          ...config.baseStation,
-          fixedMode: {
-            enabled: false,
-            coordinates: {
-              latitude: 0,
-              longitude: 0,
-              altitude: 0,
-              accuracy: 0,
-            },
-          },
-        },
-      };
-      setConfig(clearedConfig);
-      updateConfiguration(clearedConfig);
-      setIsDirty(false);
-      toast.success('Saved position deleted');
-    } catch (error) {
-      toast.error(`Failed to delete saved position: ${String(error)}`);
-    }
-  };
+  }, [isDirty, savedBasePosition]);
 
   const updateFixedCoordinates = (patch: Partial<typeof config.baseStation.fixedMode.coordinates>) => {
     updateDraftConfig((prev) => ({
@@ -652,6 +556,53 @@ export const ConfigurationScreen: React.FC = () => {
         },
       },
     }));
+  };
+
+  const loadCurrentSurvey = () => {
+    const liveLatitude = gnssStatus.globalPosition.latitude || survey.position.latitude;
+    const liveLongitude = gnssStatus.globalPosition.longitude || survey.position.longitude;
+    const liveAltitude = gnssStatus.globalPosition.altitude || survey.position.altitude;
+    const ecef = llhToEcef(liveLatitude, liveLongitude, liveAltitude);
+
+    updateDraftConfig((prev) => ({
+      ...prev,
+      baseStation: {
+        ...prev.baseStation,
+        fixedMode: {
+          enabled: true,
+          coordinates: {
+            latitude: Number(ecef.x.toFixed(4)),
+            longitude: Number(ecef.y.toFixed(4)),
+            altitude: Number(ecef.z.toFixed(4)),
+            accuracy: Number((gnssStatus.globalPosition.horizontalAccuracy || survey.position.accuracy || prev.baseStation.fixedMode.coordinates.accuracy || 0).toFixed(4)),
+          },
+        },
+      },
+    }));
+  };
+
+  const handleDeleteFixedPosition = async () => {
+    await deleteSavedPosition();
+    setFixedBaseDisplayActive(false);
+    const clearedConfig = {
+      ...config,
+      baseStation: {
+        ...config.baseStation,
+        fixedMode: {
+          enabled: false,
+          coordinates: {
+            latitude: 0,
+            longitude: 0,
+            altitude: 0,
+            accuracy: 0,
+          },
+        },
+      },
+    };
+    setConfig(clearedConfig);
+    updateConfiguration(clearedConfig);
+    setIsDirty(false);
+    toast.success('Saved position deleted');
   };
 
   // Shared classes for typography scaling (Matches Desktop & Mobile flawlessly)
@@ -1002,25 +953,25 @@ export const ConfigurationScreen: React.FC = () => {
                   <div className="p-4 space-y-4 animate-in fade-in slide-in-from-top-2 duration-300">
                     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
                       <div>
-                        <Label htmlFor="fixed-lat" className={labelClasses}>Latitude</Label>
+                        <Label htmlFor="fixed-lat" className={labelClasses}>ECEF X</Label>
                         <Input
-                          id="fixed-lat" type="number" step="0.00000001"
+                          id="fixed-lat" type="number" step="0.0001"
                           value={config.baseStation.fixedMode.coordinates.latitude}
                           onChange={(e) => updateFixedCoordinates({ latitude: parseFloat(e.target.value) || 0 })}
                           className={`${inputClasses} font-mono`}
                         />
                       </div>
                       <div>
-                        <Label htmlFor="fixed-lon" className={labelClasses}>Longitude</Label>
+                        <Label htmlFor="fixed-lon" className={labelClasses}>ECEF Y</Label>
                         <Input
-                          id="fixed-lon" type="number" step="0.00000001"
+                          id="fixed-lon" type="number" step="0.0001"
                           value={config.baseStation.fixedMode.coordinates.longitude}
                           onChange={(e) => updateFixedCoordinates({ longitude: parseFloat(e.target.value) || 0 })}
                           className={`${inputClasses} font-mono`}
                         />
                       </div>
                       <div>
-                        <Label htmlFor="fixed-alt" className={labelClasses}>Height (m)</Label>
+                        <Label htmlFor="fixed-alt" className={labelClasses}>ECEF Z</Label>
                         <Input
                           id="fixed-alt" type="number" step="0.001"
                           value={config.baseStation.fixedMode.coordinates.altitude}
