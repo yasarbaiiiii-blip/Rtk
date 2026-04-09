@@ -530,7 +530,7 @@ interface AccuracyRecord {
 }
 
 export const SurveyStatus: React.FC = () => {
-  const { survey, startSurvey, stopSurvey, configuration, gnssStatus, streams } = useGNSS();
+  const { survey, startSurvey, stopSurvey, configuration, gnssStatus, streams, isAutoFlowActive, isAutoFlowSessionActive, fixedBaseReference, isFixedBaseDisplayActive } = useGNSS();
   const [coordinateFormat, setCoordinateFormat] = useState<'Global' | 'Local'>('Global');
   const [isLoading, setIsLoading] = useState(false);
   const [accuracyHistory, setAccuracyHistory] = useState<AccuracyRecord[]>([]);
@@ -543,8 +543,16 @@ export const SurveyStatus: React.FC = () => {
   const [progressPercentage, setProgressPercentage] = useState(0);
   const hasMetTargetAccuracy = survey.valid || (survey.currentAccuracy > 0 && survey.currentAccuracy <= survey.targetAccuracy);
   const showFixedIndicators = !survey.isActive && survey.status !== 'stopped' && hasMetTargetAccuracy;
-
-  const requiredTimeSecs = survey.requiredTime > 0 ? survey.requiredTime : configuration.baseStation.surveyDuration;
+  const requiredTimeSecs = survey.isActive ? survey.requiredTime : configuration.baseStation.surveyDuration;
+  const fixedBasePosition = isFixedBaseDisplayActive && configuration.baseStation.fixedMode.enabled && fixedBaseReference?.llh
+    ? {
+        latitude: fixedBaseReference.llh.latitude,
+        longitude: fixedBaseReference.llh.longitude,
+        altitude: fixedBaseReference.llh.height_ellipsoid,
+        accuracy: fixedBaseReference.fixed_pos_acc,
+      }
+    : null;
+  const isFlowRunning = survey.isActive || survey.status === 'initializing' || isAutoFlowActive || isAutoFlowSessionActive;
 
   useEffect(() => {
     const justStarted = survey.isActive && !prevIsActiveRef.current;
@@ -621,9 +629,9 @@ export const SurveyStatus: React.FC = () => {
   };
 
   const formatCoordinate = () => {
-    const lat = gnssStatus.globalPosition.latitude || survey.position.latitude;
-    const lon = gnssStatus.globalPosition.longitude || survey.position.longitude;
-    const alt = gnssStatus.globalPosition.altitude || survey.position.altitude;
+    const lat = fixedBasePosition?.latitude ?? gnssStatus.globalPosition.latitude ?? survey.position.latitude;
+    const lon = fixedBasePosition?.longitude ?? gnssStatus.globalPosition.longitude ?? survey.position.longitude;
+    const alt = fixedBasePosition?.altitude ?? gnssStatus.globalPosition.altitude ?? survey.position.altitude;
 
     if (coordinateFormat === 'Global') {
       return {
@@ -656,6 +664,8 @@ export const SurveyStatus: React.FC = () => {
   };
 
   const coords = formatCoordinate();
+  const displayedPositionAccuracy = fixedBasePosition?.accuracy
+    ?? (survey.position.accuracy > 0 ? survey.position.accuracy : gnssStatus.globalPosition.horizontalAccuracy);
 
   const copyCoordinates = () => {
     const coordText = `${coordinateFormat}: Lat/X: ${coords.lat}, Lon/Y: ${coords.lon}, Alt/Z: ${coords.alt}m`;
@@ -708,6 +718,7 @@ export const SurveyStatus: React.FC = () => {
   const getDisplayStatus = () => {
     if (survey.isActive) return 'In Progress';
     if (survey.status === 'initializing') return 'Initializing';
+    if (!survey.isActive && streams.ntrip.active && (isAutoFlowSessionActive || isAutoFlowActive)) return 'Streaming';
     if (survey.status === 'stopped') return 'Stopped';
     if (showFixedIndicators) return 'Position Fixed';
     return 'Idle';
@@ -716,6 +727,7 @@ export const SurveyStatus: React.FC = () => {
   const getStatusBadgeColor = () => {
     if (survey.isActive) return survey.status === 'initializing' ? 'bg-blue-500 text-white' : 'bg-amber-500 text-white';
     if (survey.status === 'initializing') return 'bg-blue-500 text-white';
+    if (!survey.isActive && streams.ntrip.active && (isAutoFlowSessionActive || isAutoFlowActive)) return 'bg-emerald-500 text-white';
     if (survey.status === 'stopped') return 'bg-red-500 text-white';
     if (showFixedIndicators) return 'bg-emerald-500 text-white';
     return 'bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300';
@@ -862,17 +874,17 @@ export const SurveyStatus: React.FC = () => {
           </div>
 
           <div className="flex gap-3">
-            {!survey.isActive ? (
+            {!isFlowRunning ? (
               <Button
                 onClick={handleStartSurvey}
                 className="flex-1 gap-2 bg-blue-600 hover:bg-blue-700 text-white"
                 disabled={isLoading || survey.status === 'initializing'}
               >
-                <Play className="size-4" /> {survey.status === 'initializing' ? 'Starting Survey' : 'Start Survey'}
+                <Play className="size-4" /> {survey.status === 'initializing' ? 'Starting' : 'Start'}
               </Button>
             ) : (
               <Button onClick={handleStopSurvey} variant="destructive" className="flex-1 gap-2" disabled={isLoading}>
-                <Square className="size-4" /> Stop Survey
+                <Square className="size-4" /> Stop
               </Button>
             )}
           </div>
@@ -952,7 +964,11 @@ export const SurveyStatus: React.FC = () => {
               <div>
                 <CardTitle className="text-base text-slate-900 dark:text-slate-50 uppercase tracking-wide">Position Data</CardTitle>
                 <CardDescription className="text-[10px] font-mono text-slate-500 dark:text-slate-400 mt-0.5">
-                  {coordinateFormat === 'Global' ? 'GLOBAL_GNSS_RX' : 'LOCAL_SURVEY_PROC'}
+                  {coordinateFormat === 'Global'
+                    ? fixedBasePosition
+                      ? 'GLOBAL_FIXED_REF'
+                      : 'GLOBAL_GNSS_RX'
+                    : 'LOCAL_SURVEY_PROC'}
                 </CardDescription>
               </div>
             </div>

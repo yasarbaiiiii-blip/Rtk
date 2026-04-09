@@ -135,9 +135,11 @@ const SectionCard: React.FC<{
 
 
 export const ConfigurationScreen: React.FC = () => {
-  const { configuration, updateConfiguration, survey, streams, gnssStatus, startNTRIP, stopNTRIP, isAutoFlowActive } = useGNSS();
+  const { configuration, updateConfiguration, survey, streams, gnssStatus, startNTRIP, stopNTRIP, isAutoFlowActive, applyFixedBasePosition, fixedBaseReference, isFixedBaseDisplayActive, setFixedBaseDisplayActive } = useGNSS();
   const [config, setConfig] = useState(configuration);
   const [isDirty, setIsDirty] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [isNtripActionPending, setIsNtripActionPending] = useState(false);
   const [activeMsgType, setActiveMsgType] = useState<'MSM4' | 'MSM7'>('MSM4');
   const [rtcmActiveMessages, setRtcmActiveMessages] = useState<string[]>([]);
   const [rtcmLoading, setRtcmLoading] = useState(true);
@@ -210,6 +212,11 @@ export const ConfigurationScreen: React.FC = () => {
   const isAutoFlowToggleDirty = config.baseStation.autoMode !== backendAutoFlowEnabled;
 
   const handleMsmTypeChange = async (type: 'MSM4' | 'MSM7') => {
+    if (streams.ntrip.active) {
+      toast.info('Stop NTRIP Sender before changing RTCM mode.');
+      return;
+    }
+
     setActiveMsgType(type);
     try {
       await api.configureRTCM(type);
@@ -285,13 +292,51 @@ export const ConfigurationScreen: React.FC = () => {
     setConfig((prev) => updater(prev));
   };
 
+  const updateNtripDraft = (patch: Partial<typeof config.streams.ntrip>) => {
+    updateDraftConfig((prev) => ({
+      ...prev,
+      streams: {
+        ...prev.streams,
+        ntrip: {
+          ...prev.streams.ntrip,
+          ...patch,
+        },
+      },
+    }));
+  };
+
   const handleSave = async (): Promise<boolean> => {
     uiLogger.log('Save Configuration clicked', 'ConfigurationScreen', config);
     const payload = getAutoFlowPayload();
+    const shouldApplyFixedBase =
+      config.baseStation.fixedMode.enabled &&
+      (
+        !isFixedBaseDisplayActive ||
+        !fixedBaseReference ||
+        Math.abs(config.baseStation.fixedMode.coordinates.latitude - fixedBaseReference.llh.latitude) > 1e-9 ||
+        Math.abs(config.baseStation.fixedMode.coordinates.longitude - fixedBaseReference.llh.longitude) > 1e-9 ||
+        Math.abs(config.baseStation.fixedMode.coordinates.altitude - fixedBaseReference.llh.height_ellipsoid) > 1e-6 ||
+        Math.abs(config.baseStation.fixedMode.coordinates.accuracy - fixedBaseReference.fixed_pos_acc) > 1e-6
+      );
+
+    setIsSaving(true);
     try {
       const saveResponse = await api.saveAutoFlowConfig(payload);
 
-      const backendSnapshot = await api.getAutoFlowConfig().catch(() => null);
+      if (shouldApplyFixedBase) {
+        await applyFixedBasePosition({
+          latitude: config.baseStation.fixedMode.coordinates.latitude,
+          longitude: config.baseStation.fixedMode.coordinates.longitude,
+          height: config.baseStation.fixedMode.coordinates.altitude,
+          accuracyMeters: config.baseStation.fixedMode.coordinates.accuracy,
+          msmType: activeMsgType,
+        });
+      }
+
+      const backendSnapshot =
+        saveResponse && typeof saveResponse === 'object' && ('config' in saveResponse || 'enabled' in saveResponse)
+          ? saveResponse
+          : await api.getAutoFlowConfig().catch(() => null);
       const normalizedConfig = normalizeSavedConfig(
         backendSnapshot ?? saveResponse ?? payload
       );
@@ -312,6 +357,8 @@ export const ConfigurationScreen: React.FC = () => {
       uiLogger.log('Save Configuration Failed', 'ConfigurationScreen', undefined, errorMsg);
       toast.error(`Failed to save configuration: ${errorMsg}`);
       return false;
+    } finally {
+      setIsSaving(false);
     }
   };
 
@@ -351,12 +398,19 @@ export const ConfigurationScreen: React.FC = () => {
   };
 
   const handleStartStopNTRIP = async () => {
+    if (isNtripActionPending) {
+      return;
+    }
+
+    setIsNtripActionPending(true);
     if (streams.ntrip.active) {
       try {
         await stopNTRIP();
         toast.success('NTRIP Sender stopped');
       } catch (error) {
         toast.error(`Failed to stop NTRIP: ${error}`);
+      } finally {
+        setIsNtripActionPending(false);
       }
     } else {
       try {
@@ -370,6 +424,8 @@ export const ConfigurationScreen: React.FC = () => {
         toast.success('NTRIP Sender started');
       } catch (error) {
         toast.error(`Failed to start NTRIP: ${error}`);
+      } finally {
+        setIsNtripActionPending(false);
       }
     }
   };
@@ -399,15 +455,83 @@ export const ConfigurationScreen: React.FC = () => {
     return () => clearInterval(interval);
   }, [receiverConfig.active]);
 
-  const loadCurrentSurvey = () => {
+  const loadCurrentSurvey = async () => {
+    const latitude = gnssStatus.globalPosition.latitude || survey.position.latitude;
+    const longitude = gnssStatus.globalPosition.longitude || survey.position.longitude;
+    const altitude = gnssStatus.globalPosition.altitude || survey.position.altitude;
+    const accuracy = gnssStatus.globalPosition.horizontalAccuracy || survey.position.accuracy || config.baseStation.fixedMode.coordinates.accuracy;
+
+    const nextConfig = {
+      ...config,
+      baseStation: {
+        ...config.baseStation,
+        fixedMode: {
+          enabled: true,
+          coordinates: {
+            latitude,
+            longitude,
+            altitude,
+            accuracy,
+          },
+        },
+      },
+    };
+
+    setIsDirty(false);
+    setConfig(nextConfig);
+    updateConfiguration(nextConfig);
+
+    try {
+      await applyFixedBasePosition({
+        latitude,
+        longitude,
+        height: altitude,
+        accuracyMeters: accuracy,
+        msmType: activeMsgType,
+      });
+      toast.success('Loaded current position and applied fixed base');
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      toast.error(`Failed to apply fixed base: ${errorMsg}`);
+    }
+  };
+
+  useEffect(() => {
+    if (!fixedBaseReference || isDirty) {
+      return;
+    }
+
+    setConfig((prev) => ({
+      ...prev,
+      baseStation: {
+        ...prev.baseStation,
+        fixedMode: {
+          enabled: true,
+          coordinates: {
+            latitude: fixedBaseReference.llh.latitude,
+            longitude: fixedBaseReference.llh.longitude,
+            altitude: fixedBaseReference.llh.height_ellipsoid,
+            accuracy: fixedBaseReference.fixed_pos_acc,
+          },
+        },
+      },
+    }));
+  }, [fixedBaseReference, isDirty]);
+
+  const updateFixedCoordinates = (patch: Partial<typeof config.baseStation.fixedMode.coordinates>) => {
     updateDraftConfig((prev) => ({
       ...prev,
       baseStation: {
         ...prev.baseStation,
-        fixedMode: { enabled: true, coordinates: survey.position },
+        fixedMode: {
+          ...prev.baseStation.fixedMode,
+          coordinates: {
+            ...prev.baseStation.fixedMode.coordinates,
+            ...patch,
+          },
+        },
       },
     }));
-    toast.success('Loaded coordinates from current survey');
   };
 
   // Shared classes for typography scaling (Matches Desktop & Mobile flawlessly)
@@ -451,9 +575,9 @@ export const ConfigurationScreen: React.FC = () => {
               </AlertDialogContent>
             </AlertDialog>
             
-            <Button onClick={handleSave} className="h-10 px-5 gap-2 transition-transform active:scale-95 bg-blue-600 hover:bg-blue-700 text-white shadow-sm text-sm font-semibold rounded-lg">
+            <Button onClick={handleSave} disabled={isSaving} className="h-10 px-5 gap-2 transition-transform active:scale-95 bg-blue-600 hover:bg-blue-700 text-white shadow-sm text-sm font-semibold rounded-lg disabled:opacity-70 disabled:cursor-not-allowed">
               <Save className="size-4" />
-              Save Changes
+              {isSaving ? 'Saving...' : 'Save Changes'}
             </Button>
           </div>
         )}
@@ -640,15 +764,21 @@ export const ConfigurationScreen: React.FC = () => {
                           : 'Synced With Backend'}
                       </div>
                     </div>
-                    <div className="rounded-xl border border-slate-200 dark:border-slate-800/80 bg-white/80 dark:bg-slate-950/60 p-3.5 shadow-sm">
-                      <div className="text-[10px] font-semibold uppercase tracking-widest text-slate-500 dark:text-slate-400 mb-1">Runtime</div>
-                      <div className={`text-sm font-semibold ${isAutoFlowActive ? 'text-emerald-700 dark:text-emerald-300' : 'text-slate-700 dark:text-slate-300'}`}>
-                        {isAutoFlowActive ? 'Currently Running' : 'Currently Idle'}
-                      </div>
+                      <div className="rounded-xl border border-slate-200 dark:border-slate-800/80 bg-white/80 dark:bg-slate-950/60 p-3.5 shadow-sm">
+                        <div className="text-[10px] font-semibold uppercase tracking-widest text-slate-500 dark:text-slate-400 mb-1">Runtime</div>
+                        <div className={`text-sm font-semibold ${isAutoFlowActive ? 'text-emerald-700 dark:text-emerald-300' : 'text-slate-700 dark:text-slate-300'}`}>
+                          {isAutoFlowActive ? 'Currently Running' : 'Currently Idle'}
+                        </div>
                     </div>
                   </div>
                 </div>
               </div>
+
+              {streams.ntrip.active && (
+                <div className="rounded-xl border border-amber-200 dark:border-amber-900/40 bg-amber-50/70 dark:bg-amber-900/10 px-4 py-3 text-xs font-medium text-amber-800 dark:text-amber-200">
+                  Stop NTRIP Sender before switching RTCM mode between MSM4 and MSM7.
+                </div>
+              )}
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 {/* Duration */}
@@ -732,21 +862,31 @@ export const ConfigurationScreen: React.FC = () => {
                   </div>
                   <Switch
                     checked={config.baseStation.fixedMode.enabled}
-                    onCheckedChange={(checked) =>
-                      setConfig({ ...config, baseStation: { ...config.baseStation, fixedMode: { ...config.baseStation.fixedMode, enabled: checked } } })
-                    }
+                    onCheckedChange={(checked) => {
+                      if (!checked) {
+                        setFixedBaseDisplayActive(false);
+                      }
+
+                      updateDraftConfig((prev) => ({
+                        ...prev,
+                        baseStation: {
+                          ...prev.baseStation,
+                          fixedMode: { ...prev.baseStation.fixedMode, enabled: checked },
+                        },
+                      }));
+                    }}
                   />
                 </div>
                 
                 {config.baseStation.fixedMode.enabled && (
                   <div className="p-4 space-y-4 animate-in fade-in slide-in-from-top-2 duration-300">
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
                       <div>
                         <Label htmlFor="fixed-lat" className={labelClasses}>Latitude</Label>
                         <Input
                           id="fixed-lat" type="number" step="0.00000001"
                           value={config.baseStation.fixedMode.coordinates.latitude}
-                          onChange={(e) => setConfig({ ...config, baseStation: { ...config.baseStation, fixedMode: { ...config.baseStation.fixedMode, coordinates: { ...config.baseStation.fixedMode.coordinates, latitude: parseFloat(e.target.value) || 0 } } } })}
+                          onChange={(e) => updateFixedCoordinates({ latitude: parseFloat(e.target.value) || 0 })}
                           className={`${inputClasses} font-mono`}
                         />
                       </div>
@@ -755,16 +895,25 @@ export const ConfigurationScreen: React.FC = () => {
                         <Input
                           id="fixed-lon" type="number" step="0.00000001"
                           value={config.baseStation.fixedMode.coordinates.longitude}
-                          onChange={(e) => setConfig({ ...config, baseStation: { ...config.baseStation, fixedMode: { ...config.baseStation.fixedMode, coordinates: { ...config.baseStation.fixedMode.coordinates, longitude: parseFloat(e.target.value) || 0 } } } })}
+                          onChange={(e) => updateFixedCoordinates({ longitude: parseFloat(e.target.value) || 0 })}
                           className={`${inputClasses} font-mono`}
                         />
                       </div>
                       <div>
-                        <Label htmlFor="fixed-alt" className={labelClasses}>Altitude (m)</Label>
+                        <Label htmlFor="fixed-alt" className={labelClasses}>Height (m)</Label>
                         <Input
                           id="fixed-alt" type="number" step="0.001"
                           value={config.baseStation.fixedMode.coordinates.altitude}
-                          onChange={(e) => setConfig({ ...config, baseStation: { ...config.baseStation, fixedMode: { ...config.baseStation.fixedMode, coordinates: { ...config.baseStation.fixedMode.coordinates, altitude: parseFloat(e.target.value) || 0 } } } })}
+                          onChange={(e) => updateFixedCoordinates({ altitude: parseFloat(e.target.value) || 0 })}
+                          className={`${inputClasses} font-mono`}
+                        />
+                      </div>
+                      <div>
+                        <Label htmlFor="fixed-acc" className={labelClasses}>Accuracy (m)</Label>
+                        <Input
+                          id="fixed-acc" type="number" step="0.001"
+                          value={config.baseStation.fixedMode.coordinates.accuracy}
+                          onChange={(e) => updateFixedCoordinates({ accuracy: parseFloat(e.target.value) || 0 })}
                           className={`${inputClasses} font-mono`}
                         />
                       </div>
@@ -817,26 +966,26 @@ export const ConfigurationScreen: React.FC = () => {
                   <div className="space-y-4 flex-1">
                     <div>
                       <Label htmlFor="ntrip-server" className={labelClasses}>Caster Host</Label>
-                      <Input id="ntrip-server" value={config.streams.ntrip.server} onChange={(e) => setConfig({ ...config, streams: { ...config.streams, ntrip: { ...config.streams.ntrip, server: e.target.value } } })} className={`${inputClasses} font-mono`} />
+                      <Input id="ntrip-server" value={config.streams.ntrip.server} onChange={(e) => updateNtripDraft({ server: e.target.value })} className={`${inputClasses} font-mono`} />
                     </div>
                     <div className="grid grid-cols-2 gap-4">
                       <div>
                         <Label htmlFor="ntrip-port" className={labelClasses}>Port</Label>
-                        <Input id="ntrip-port" type="number" value={config.streams.ntrip.port} onChange={(e) => setConfig({ ...config, streams: { ...config.streams, ntrip: { ...config.streams.ntrip, port: parseInt(e.target.value) || 2101 } } })} className={`${inputClasses} font-mono`} />
+                        <Input id="ntrip-port" type="number" value={config.streams.ntrip.port} onChange={(e) => updateNtripDraft({ port: parseInt(e.target.value) || 2101 })} className={`${inputClasses} font-mono`} />
                       </div>
                       <div>
                         <Label htmlFor="ntrip-mountpoint" className={labelClasses}>Mountpoint</Label>
-                        <Input id="ntrip-mountpoint" value={config.streams.ntrip.mountpoint} onChange={(e) => setConfig({ ...config, streams: { ...config.streams, ntrip: { ...config.streams.ntrip, mountpoint: e.target.value } } })} className={`${inputClasses} font-mono`} />
+                        <Input id="ntrip-mountpoint" value={config.streams.ntrip.mountpoint} onChange={(e) => updateNtripDraft({ mountpoint: e.target.value })} className={`${inputClasses} font-mono`} />
                       </div>
                     </div>
                     <div>
                       <Label htmlFor="ntrip-user" className={labelClasses}>Username</Label>
-                      <Input id="ntrip-user" value={config.streams.ntrip.username || ""} onChange={(e) => setConfig({ ...config, streams: { ...config.streams, ntrip: { ...config.streams.ntrip, username: e.target.value } } })} className={inputClasses} />
+                      <Input id="ntrip-user" value={config.streams.ntrip.username || ""} onChange={(e) => updateNtripDraft({ username: e.target.value })} className={inputClasses} />
                     </div>
                     <div>
                       <Label htmlFor="ntrip-pass" className={labelClasses}>Password</Label>
                       <div className="relative">
-                        <Input id="ntrip-pass" type={showPasswords.ntripSender ? 'text' : 'password'} value={config.streams.ntrip.password} onChange={(e) => setConfig({ ...config, streams: { ...config.streams, ntrip: { ...config.streams.ntrip, password: e.target.value } } })} className={`${inputClasses} pr-10`} />
+                        <Input id="ntrip-pass" type={showPasswords.ntripSender ? 'text' : 'password'} value={config.streams.ntrip.password} onChange={(e) => updateNtripDraft({ password: e.target.value })} className={`${inputClasses} pr-10`} />
                         <button type="button" onClick={() => setShowPasswords({ ...showPasswords, ntripSender: !showPasswords.ntripSender })} className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-500 transition-colors p-2">
                           {showPasswords.ntripSender ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
                         </button>
@@ -848,9 +997,11 @@ export const ConfigurationScreen: React.FC = () => {
                     variant={streams.ntrip.active ? "destructive" : "default"}
                     className={`w-full h-11 rounded-lg text-sm font-semibold tracking-wide transition-transform active:scale-95 shadow-sm mt-2 ${streams.ntrip.active ? 'bg-red-600 hover:bg-red-700' : 'bg-emerald-600 hover:bg-emerald-700 text-white'}`}
                     onClick={handleStartStopNTRIP}
-                    disabled={!config.streams.ntrip.server || !config.streams.ntrip.mountpoint || !config.streams.ntrip.password}
+                    disabled={isNtripActionPending || !config.streams.ntrip.server || !config.streams.ntrip.mountpoint || !config.streams.ntrip.password}
                   >
-                    {streams.ntrip.active ? "STOP SENDER" : "START SENDER"}
+                    {isNtripActionPending
+                      ? streams.ntrip.active ? "STOPPING SENDER..." : "STARTING SENDER..."
+                      : streams.ntrip.active ? "STOP SENDER" : "START SENDER"}
                   </Button>
                 </TabsContent>
 

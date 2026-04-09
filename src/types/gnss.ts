@@ -90,6 +90,25 @@ export interface GNSSStatus {
   };
 }
 
+export interface FixedBaseReference {
+  mode: string;
+  source: string;
+  fixed_pos_acc: number;
+  rtcm_enabled: boolean;
+  save_to_flash: boolean;
+  timestamp: string;
+  llh: {
+    latitude: number;
+    longitude: number;
+    height_ellipsoid: number;
+  };
+}
+
+export interface BaseReferenceStatus {
+  fixed_reference: FixedBaseReference | null;
+  survey_reference: Record<string, unknown> | null;
+}
+
 /* ================= STREAMS ================= */
 
 export interface StreamInfo {

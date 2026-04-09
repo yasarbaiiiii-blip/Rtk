@@ -45,6 +45,7 @@ export const api = {
   getHealth: async () => fetch(`${requireApiBase()}/api/v1/health`).then(handleResponse),
   getStatus: async () => fetch(`${requireApiBase()}/api/v1/status`).then(handleResponse),
   getStatusPosition: async () => fetch(`${requireApiBase()}/api/v1/status/position`).then(handleResponse),
+  getStatusBaseReference: async () => fetch(`${requireApiBase()}/api/v1/status/base-reference`).then(handleResponse),
   getStatusSurvey: async () => fetch(`${requireApiBase()}/api/v1/status/survey`).then(handleResponse),
   getSurvey: async () => fetch(`${requireApiBase()}/api/v1/survey`).then(handleResponse),
   getSurveyStatus: async () => {
@@ -116,6 +117,16 @@ export const api = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(requestBody),
+    }).then(handleResponse);
+  },
+
+  configureFixedBase: async (config: any) => {
+    const base = requireApiBase();
+    console.log(`API Request [POST] ${base}/api/v1/base/fixed:`, config);
+    return fetch(`${base}/api/v1/base/fixed`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(config),
     }).then(handleResponse);
   },
 
