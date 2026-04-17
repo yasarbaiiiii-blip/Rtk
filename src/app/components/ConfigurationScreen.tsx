@@ -29,7 +29,8 @@ import {
   ChevronLeft,
   Play,
   Square,
-  X
+  X,
+  Trash2
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { uiLogger } from '../../utils/uiLogger';
@@ -43,7 +44,10 @@ const SectionCard: React.FC<{
   children: React.ReactNode;
   isMobile: boolean;
   handleSave: () => Promise<boolean>;
-}> = ({ title, description, icon: Icon, children, isMobile, handleSave }) => {
+  hasChanges?: boolean;
+  actionLabel?: string;
+  actionPending?: boolean;
+}> = ({ title, description, icon: Icon, children, isMobile, handleSave, hasChanges = false, actionLabel = 'Save Changes', actionPending = false }) => {
   const [isOpen, setIsOpen] = useState(false);
 
   // Prevent background scrolling when mobile modal is open
@@ -96,14 +100,20 @@ const SectionCard: React.FC<{
              <div className="p-4 border-t border-slate-200 dark:border-slate-800 bg-white/90 dark:bg-slate-900/90 backdrop-blur-md pb-safe shrink-0">
                 <Button
                   onClick={async () => {
+                    if (!hasChanges) {
+                      setIsOpen(false);
+                      return;
+                    }
+
                     const saved = await handleSave();
                     if (saved) {
                       setIsOpen(false);
                     }
                   }}
-                  className="w-full h-11 rounded-lg text-sm font-semibold bg-blue-600 hover:bg-blue-700 text-white shadow-sm"
+                  disabled={actionPending}
+                  className="w-full h-11 rounded-lg text-sm font-semibold bg-blue-600 hover:bg-blue-700 text-white shadow-sm disabled:opacity-70 disabled:cursor-not-allowed"
                 >
-                  Save & Close
+                  {hasChanges ? actionLabel : 'Close'}
                 </Button>
              </div>
           </div>
@@ -135,7 +145,7 @@ const SectionCard: React.FC<{
 
 
 export const ConfigurationScreen: React.FC = () => {
-  const { configuration, updateConfiguration, survey, streams, gnssStatus, startNTRIP, stopNTRIP, isAutoFlowActive, applyFixedBasePosition, fixedBaseReference, isFixedBaseDisplayActive, setFixedBaseDisplayActive } = useGNSS();
+  const { configuration, updateConfiguration, survey, streams, gnssStatus, startNTRIP, stopNTRIP, isAutoFlowActive, applyFixedBasePosition, fixedBaseReference, savedBasePosition, isFixedBaseDisplayActive, setFixedBaseDisplayActive, deleteSavedPosition } = useGNSS();
   const [config, setConfig] = useState(configuration);
   const [isDirty, setIsDirty] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
@@ -167,6 +177,26 @@ export const ConfigurationScreen: React.FC = () => {
   const [isMobile, setIsMobile] = useState(false);
   const [autoFlowPromptDismissed, setAutoFlowPromptDismissed] = useState(false);
   const [autoFlowActionPending, setAutoFlowActionPending] = useState(false);
+
+  const ecefToLlh = (x: number, y: number, z: number) => {
+    const a = 6378137.0;
+    const e2 = 6.69437999014e-3;
+    const b = a * Math.sqrt(1 - e2);
+    const ep = Math.sqrt((a * a - b * b) / (b * b));
+    const p = Math.sqrt(x * x + y * y);
+    const th = Math.atan2(a * z, b * p);
+    const lon = Math.atan2(y, x);
+    const lat = Math.atan2(z + ep * ep * b * Math.pow(Math.sin(th), 3), p - e2 * a * Math.pow(Math.cos(th), 3));
+    const sinLat = Math.sin(lat);
+    const n = a / Math.sqrt(1 - e2 * sinLat * sinLat);
+    const alt = p / Math.cos(lat) - n;
+
+    return {
+      latitude: lat * (180 / Math.PI),
+      longitude: lon * (180 / Math.PI),
+      altitude: alt,
+    };
+  };
   
   // ⭐ FIX: Changed breakpoint to 768px. Tablets (like iPad) are typically 768px+. 
   // This ensures tablets get the full desktop grid view, and only phones get the clickable modal view.
@@ -210,6 +240,13 @@ export const ConfigurationScreen: React.FC = () => {
 
   const backendAutoFlowEnabled = configuration.baseStation.autoMode;
   const isAutoFlowToggleDirty = config.baseStation.autoMode !== backendAutoFlowEnabled;
+  const hasBaseChanges = JSON.stringify(config.baseStation) !== JSON.stringify(configuration.baseStation);
+  const hasNtripChanges = JSON.stringify(config.streams.ntrip) !== JSON.stringify(configuration.streams.ntrip);
+  const hasTelemetryChanges =
+    JSON.stringify(config.streams.serial) !== JSON.stringify(configuration.streams.serial) ||
+    JSON.stringify(config.streams.tcp) !== JSON.stringify(configuration.streams.tcp) ||
+    JSON.stringify(config.streams.udp) !== JSON.stringify(configuration.streams.udp);
+  const hasSystemChanges = JSON.stringify(config.system) !== JSON.stringify(configuration.system);
 
   const handleMsmTypeChange = async (type: 'MSM4' | 'MSM7') => {
     if (streams.ntrip.active) {
@@ -497,7 +534,36 @@ export const ConfigurationScreen: React.FC = () => {
   };
 
   useEffect(() => {
-    if (!fixedBaseReference || isDirty) {
+    if (isDirty) {
+      return;
+    }
+
+    if (savedBasePosition) {
+      const llh = ecefToLlh(
+        savedBasePosition.ecef_x,
+        savedBasePosition.ecef_y,
+        savedBasePosition.ecef_z
+      );
+
+      setConfig((prev) => ({
+        ...prev,
+        baseStation: {
+          ...prev.baseStation,
+          fixedMode: {
+            enabled: true,
+            coordinates: {
+              latitude: llh.latitude,
+              longitude: llh.longitude,
+              altitude: llh.altitude,
+              accuracy: savedBasePosition.accuracy,
+            },
+          },
+        },
+      }));
+      return;
+    }
+
+    if (!fixedBaseReference) {
       return;
     }
 
@@ -516,7 +582,61 @@ export const ConfigurationScreen: React.FC = () => {
         },
       },
     }));
-  }, [fixedBaseReference, isDirty]);
+  }, [fixedBaseReference, isDirty, savedBasePosition]);
+
+  
+  const syncFixedCoordinatesFromSaved = () => {
+    if (savedBasePosition && !isDirty) {
+      const llh = ecefToLlh(savedBasePosition.ecef_x, savedBasePosition.ecef_y, savedBasePosition.ecef_z);
+      setConfig((prev) => ({
+        ...prev,
+        baseStation: {
+          ...prev.baseStation,
+          fixedMode: {
+            ...prev.baseStation.fixedMode,
+            coordinates: {
+              latitude: llh.latitude,
+              longitude: llh.longitude,
+              altitude: llh.altitude,
+              accuracy: savedBasePosition.accuracy,
+            },
+          },
+        },
+      }));
+    }
+  };
+
+  // Sync coordinates when saved position changes
+  useEffect(() => {
+    syncFixedCoordinatesFromSaved();
+  }, [savedBasePosition]);
+
+  const handleDeleteFixedPosition = async () => {
+    try {
+      await deleteSavedPosition();
+      const clearedConfig = {
+        ...config,
+        baseStation: {
+          ...config.baseStation,
+          fixedMode: {
+            enabled: false,
+            coordinates: {
+              latitude: 0,
+              longitude: 0,
+              altitude: 0,
+              accuracy: 0,
+            },
+          },
+        },
+      };
+      setConfig(clearedConfig);
+      updateConfiguration(clearedConfig);
+      setIsDirty(false);
+      toast.success('Saved position deleted');
+    } catch (error) {
+      toast.error(`Failed to delete saved position: ${String(error)}`);
+    }
+  };
 
   const updateFixedCoordinates = (patch: Partial<typeof config.baseStation.fixedMode.coordinates>) => {
     updateDraftConfig((prev) => ({
@@ -589,7 +709,7 @@ export const ConfigurationScreen: React.FC = () => {
         {/* ── COLUMN 1 ── */}
         <div className="space-y-4 md:space-y-6 flex flex-col">
 
-          <SectionCard title="Base Station Positioning" description="Configure Survey-In constraints and operation modes" icon={Target} isMobile={isMobile} handleSave={handleSave}>
+          <SectionCard title="Base Station Positioning" description="Configure Survey-In constraints and operation modes" icon={Target} isMobile={isMobile} handleSave={handleSave} hasChanges={hasBaseChanges} actionLabel={isSaving ? 'Saving Changes...' : 'Save Changes'} actionPending={isSaving}>
               {/*
               <div className="flex items-center justify-between p-4 md:p-5 rounded-xl bg-slate-50 dark:bg-slate-950/50 border border-slate-200 dark:border-slate-800/80 shadow-sm transition-colors">
                 <div className="pr-3">
@@ -922,12 +1042,20 @@ export const ConfigurationScreen: React.FC = () => {
                       <MapPin className="size-4 text-blue-500" />
                       LOAD CURRENT POSITION
                     </Button>
+                    <Button
+                      variant="outline"
+                      className="w-full gap-2 border-red-200 dark:border-red-900/50 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/30 transition-colors active:scale-95 font-semibold h-10 rounded-lg text-xs tracking-wide bg-white dark:bg-slate-900"
+                      onClick={handleDeleteFixedPosition}
+                    >
+                      <Trash2 className="size-4" />
+                      DELETE SAVED POSITION
+                    </Button>
                   </div>
                 )}
               </div>
           </SectionCard>
 
-          <SectionCard title="NTRIP Configuration" description="Manage Caster network connections" icon={Globe} isMobile={isMobile} handleSave={handleSave}>
+          <SectionCard title="NTRIP Configuration" description="Manage Caster network connections" icon={Globe} isMobile={isMobile} handleSave={handleSave} hasChanges={hasNtripChanges} actionLabel={isSaving ? 'Saving Details...' : 'Save Details'} actionPending={isSaving}>
               <Tabs defaultValue="sender" className="w-full flex flex-col">
                 <div className="pb-3">
                   <TabsList className="grid w-full grid-cols-2 bg-slate-100 dark:bg-slate-950/50 p-1 rounded-lg border border-slate-200 dark:border-slate-800/60 h-10">
@@ -1075,7 +1203,7 @@ export const ConfigurationScreen: React.FC = () => {
         {/* ── COLUMN 2 ── */}
         <div className="space-y-4 md:space-y-6 flex flex-col">
 
-          <SectionCard title="Telemetry Interfaces" description="Local data stream endpoints" icon={Activity} isMobile={isMobile} handleSave={handleSave}>
+          <SectionCard title="Telemetry Interfaces" description="Local data stream endpoints" icon={Activity} isMobile={isMobile} handleSave={handleSave} hasChanges={hasTelemetryChanges} actionLabel={isSaving ? 'Saving Changes...' : 'Save Changes'} actionPending={isSaving}>
               <Tabs defaultValue="serial" className="w-full flex flex-col">
                 <div className="pb-3">
                   <TabsList className="grid w-full grid-cols-3 bg-slate-100 dark:bg-slate-950/50 p-1 rounded-lg border border-slate-200 dark:border-slate-800/60 h-10">
@@ -1091,7 +1219,7 @@ export const ConfigurationScreen: React.FC = () => {
                     <Label htmlFor="serial-baud" className={labelClasses}>Baud Rate</Label>
                     <Select
                       value={config.streams.serial.baudRate.toString()}
-                      onValueChange={(value) => setConfig({ ...config, streams: { ...config.streams, serial: { ...config.streams.serial, baudRate: parseInt(value) } } })}
+                      onValueChange={(value) => updateDraftConfig((prev) => ({ ...prev, streams: { ...prev.streams, serial: { ...prev.streams.serial, baudRate: parseInt(value) } } }))}
                     >
                       <SelectTrigger id="serial-baud" className={`${inputClasses} font-mono px-3`}>
                         <SelectValue />
@@ -1173,11 +1301,11 @@ export const ConfigurationScreen: React.FC = () => {
                   <div className="grid grid-cols-2 gap-4">
                     <div>
                       <Label htmlFor="tcp-port" className={labelClasses}>Port</Label>
-                      <Input id="tcp-port" type="number" value={config.streams.tcp.port} onChange={(e) => setConfig({ ...config, streams: { ...config.streams, tcp: { ...config.streams.tcp, port: parseInt(e.target.value) || 9000 } } })} className={`${inputClasses} font-mono`} />
+                      <Input id="tcp-port" type="number" value={config.streams.tcp.port} onChange={(e) => updateDraftConfig((prev) => ({ ...prev, streams: { ...prev.streams, tcp: { ...prev.streams.tcp, port: parseInt(e.target.value) || 9000 } } }))} className={`${inputClasses} font-mono`} />
                     </div>
                     <div>
                       <Label htmlFor="tcp-clients" className={labelClasses}>Max Clients</Label>
-                      <Input id="tcp-clients" type="number" min="1" max="10" value={config.streams.tcp.maxClients} onChange={(e) => setConfig({ ...config, streams: { ...config.streams, tcp: { ...config.streams.tcp, maxClients: parseInt(e.target.value) || 5 } } })} className={`${inputClasses} font-mono`} />
+                      <Input id="tcp-clients" type="number" min="1" max="10" value={config.streams.tcp.maxClients} onChange={(e) => updateDraftConfig((prev) => ({ ...prev, streams: { ...prev.streams, tcp: { ...prev.streams.tcp, maxClients: parseInt(e.target.value) || 5 } } }))} className={`${inputClasses} font-mono`} />
                     </div>
                   </div>
                   <div className={boxClasses}>
@@ -1186,7 +1314,7 @@ export const ConfigurationScreen: React.FC = () => {
                         <Label htmlFor="tcp-auth" className="text-sm font-semibold text-slate-900 dark:text-slate-100 cursor-pointer">Require Auth</Label>
                         <p className="text-[11px] font-medium text-slate-500 mt-0.5">Enforce authentication on connection.</p>
                       </div>
-                      <Switch id="tcp-auth" checked={config.streams.tcp.authEnabled} onCheckedChange={(checked) => setConfig({ ...config, streams: { ...config.streams, tcp: { ...config.streams.tcp, authEnabled: checked } } })} />
+                      <Switch id="tcp-auth" checked={config.streams.tcp.authEnabled} onCheckedChange={(checked) => updateDraftConfig((prev) => ({ ...prev, streams: { ...prev.streams, tcp: { ...prev.streams.tcp, authEnabled: checked } } }))} />
                     </div>
                   </div>
                 </TabsContent>
@@ -1195,11 +1323,11 @@ export const ConfigurationScreen: React.FC = () => {
                 <TabsContent value="udp" className="m-0 space-y-4 animate-in fade-in slide-in-from-right-2 duration-300">
                   <div>
                     <Label htmlFor="udp-port" className={labelClasses}>Port</Label>
-                    <Input id="udp-port" type="number" value={config.streams.udp.port} onChange={(e) => setConfig({ ...config, streams: { ...config.streams, udp: { ...config.streams.udp, port: parseInt(e.target.value) || 9001 } } })} className={`${inputClasses} font-mono`} />
+                    <Input id="udp-port" type="number" value={config.streams.udp.port} onChange={(e) => updateDraftConfig((prev) => ({ ...prev, streams: { ...prev.streams, udp: { ...prev.streams.udp, port: parseInt(e.target.value) || 9001 } } }))} className={`${inputClasses} font-mono`} />
                   </div>
                   <div>
                     <Label htmlFor="udp-address" className={labelClasses}>Broadcast Address</Label>
-                    <Input id="udp-address" value={config.streams.udp.broadcastAddress} onChange={(e) => setConfig({ ...config, streams: { ...config.streams, udp: { ...config.streams.udp, broadcastAddress: e.target.value } } })} className={`${inputClasses} font-mono`} />
+                    <Input id="udp-address" value={config.streams.udp.broadcastAddress} onChange={(e) => updateDraftConfig((prev) => ({ ...prev, streams: { ...prev.streams, udp: { ...prev.streams.udp, broadcastAddress: e.target.value } } }))} className={`${inputClasses} font-mono`} />
                   </div>
                   <div className={boxClasses}>
                     <div className="flex items-center justify-between">
@@ -1207,14 +1335,14 @@ export const ConfigurationScreen: React.FC = () => {
                         <Label htmlFor="udp-multicast" className="text-sm font-semibold text-slate-900 dark:text-slate-100 cursor-pointer">Enable Multicast</Label>
                         <p className="text-[11px] font-medium text-slate-500 mt-0.5">Send stream to multicast group.</p>
                       </div>
-                      <Switch id="udp-multicast" checked={config.streams.udp.multicast} onCheckedChange={(checked) => setConfig({ ...config, streams: { ...config.streams, udp: { ...config.streams.udp, multicast: checked } } })} />
+                      <Switch id="udp-multicast" checked={config.streams.udp.multicast} onCheckedChange={(checked) => updateDraftConfig((prev) => ({ ...prev, streams: { ...prev.streams, udp: { ...prev.streams.udp, multicast: checked } } }))} />
                     </div>
                   </div>
                 </TabsContent>
               </Tabs>
           </SectionCard>
 
-          <SectionCard title="System Environment" description="Hardware and local network controls" icon={Cpu} isMobile={isMobile} handleSave={handleSave}>
+          <SectionCard title="System Environment" description="Hardware and local network controls" icon={Cpu} isMobile={isMobile} handleSave={handleSave} hasChanges={hasSystemChanges} actionLabel={isSaving ? 'Saving Changes...' : 'Save Changes'} actionPending={isSaving}>
               <div className="space-y-4">
                 <div className="flex items-center gap-2 mb-2 border-b border-slate-100 dark:border-slate-800/80 pb-2">
                   <Wifi className="size-4 text-slate-500" />
@@ -1223,12 +1351,12 @@ export const ConfigurationScreen: React.FC = () => {
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div>
                     <Label htmlFor="wifi-ssid" className={labelClasses}>SSID Name</Label>
-                    <Input id="wifi-ssid" value={config.system.wifiSsid} onChange={(e) => setConfig({ ...config, system: { ...config.system, wifiSsid: e.target.value } })} className={`${inputClasses} font-mono`} />
+                    <Input id="wifi-ssid" value={config.system.wifiSsid} onChange={(e) => updateDraftConfig((prev) => ({ ...prev, system: { ...prev.system, wifiSsid: e.target.value } }))} className={`${inputClasses} font-mono`} />
                   </div>
                   <div>
                     <Label htmlFor="wifi-password" className={labelClasses}>Password</Label>
                     <div className="relative">
-                      <Input id="wifi-password" type={showPasswords.wifi ? 'text' : 'password'} value={config.system.wifiPassword} onChange={(e) => setConfig({ ...config, system: { ...config.system, wifiPassword: e.target.value } })} className={`${inputClasses} font-mono pr-10`} />
+                      <Input id="wifi-password" type={showPasswords.wifi ? 'text' : 'password'} value={config.system.wifiPassword} onChange={(e) => updateDraftConfig((prev) => ({ ...prev, system: { ...prev.system, wifiPassword: e.target.value } }))} className={`${inputClasses} font-mono pr-10`} />
                       <button type="button" onClick={() => setShowPasswords({ ...showPasswords, wifi: !showPasswords.wifi })} className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-500 transition-colors p-2">
                         {showPasswords.wifi ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
                       </button>
@@ -1245,7 +1373,7 @@ export const ConfigurationScreen: React.FC = () => {
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
                   <div>
                     <Label htmlFor="led-mode" className={labelClasses}>Display Mode</Label>
-                    <Select value={config.system.ledMode} onValueChange={(value) => setConfig({ ...config, system: { ...config.system, ledMode: value } })}>
+                    <Select value={config.system.ledMode} onValueChange={(value) => updateDraftConfig((prev) => ({ ...prev, system: { ...prev.system, ledMode: value } }))}>
                       <SelectTrigger id="led-mode" className={`${inputClasses} px-3`}>
                         <SelectValue />
                       </SelectTrigger>
@@ -1261,13 +1389,13 @@ export const ConfigurationScreen: React.FC = () => {
                       <Label htmlFor="led-brightness" className={labelClasses}>Brightness</Label>
                       <Badge variant="outline" className="font-mono text-[10px] font-semibold bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 px-2 py-0.5 rounded-md">{config.system.ledBrightness}%</Badge>
                     </div>
-                    <Slider id="led-brightness" min={0} max={100} step={10} className="py-1" value={[config.system.ledBrightness]} onValueChange={([value]) => setConfig({ ...config, system: { ...config.system, ledBrightness: value } })} />
+                    <Slider id="led-brightness" min={0} max={100} step={10} className="py-1" value={[config.system.ledBrightness]} onValueChange={([value]) => updateDraftConfig((prev) => ({ ...prev, system: { ...prev.system, ledBrightness: value } }))} />
                   </div>
                 </div>
               </div>
           </SectionCard>
 
-          <SectionCard title="System Diagnostics" description="Live hardware readout" icon={Terminal} isMobile={isMobile} handleSave={handleSave}>
+          <SectionCard title="System Diagnostics" description="Live hardware readout" icon={Terminal} isMobile={isMobile} handleSave={handleSave} hasChanges={false}>
               <div className="grid grid-cols-2 gap-4">
                 <div className={boxClasses}>
                   <div className="text-[10px] font-semibold text-slate-500 uppercase tracking-widest mb-1">Firmware Build</div>

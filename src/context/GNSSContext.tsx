@@ -22,6 +22,9 @@ import {
   Satellite,
   FixedBaseReference,
   BaseReferenceStatus,
+  SavedBasePosition,
+  SavedBasePositionResponse,
+  AutoFlowRuntimeState,
 } from "../types/gnss";
 
 import { api, getApiHost, getWsUrl, setApiHost } from "../api/gnssApiDynamic";
@@ -39,7 +42,9 @@ type GNSSContextType = {
   enterOfflinePreview: () => void;
   exitOfflinePreview: () => void;
   isAutoFlowSessionActive: boolean;
+  autoFlowRuntime: AutoFlowRuntimeState;
   fixedBaseReference: FixedBaseReference | null;
+  savedBasePosition: SavedBasePosition | null;
   isFixedBaseDisplayActive: boolean;
   applyFixedBasePosition: (params: {
     latitude: number;
@@ -77,6 +82,9 @@ type GNSSContextType = {
   exportLogsCSV: () => Promise<void>;
   startNTRIP: (host: string, port: number, mountpoint: string, password: string, username?: string) => Promise<void>;
   stopNTRIP: () => Promise<void>;
+  deleteSavedPosition: () => Promise<void>;
+  confirmResurvey: () => Promise<void>;
+  skipResurvey: () => Promise<void>;
 };
 
 const GNSSContext = createContext<GNSSContextType | null>(null);
@@ -274,7 +282,13 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [configuration, setConfiguration] = useState<Configuration>(loadPersistedConfig);
   const [settings, setSettings] = useState<AppSettings>(loadPersistedSettings);
   const [isAutoFlowSessionActive, setIsAutoFlowSessionActive] = useState(false);
+  const [autoFlowRuntime, setAutoFlowRuntime] = useState<AutoFlowRuntimeState>({
+    stage: "idle",
+    isAwaitingConfirm: false,
+    deadlineAt: null,
+  });
   const [fixedBaseReference, setFixedBaseReference] = useState<FixedBaseReference | null>(null);
+  const [savedBasePosition, setSavedBasePosition] = useState<SavedBasePosition | null>(null);
   const [isFixedBaseDisplayActive, setIsFixedBaseDisplayActive] = useState(false);
 
   const preserveCount = (incoming: unknown, previous: number) => {
@@ -296,6 +310,42 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (!Number.isFinite(next)) return previous;
     return next;
   };
+
+  const parseDeadlineDate = (value: unknown) => {
+    if (typeof value !== "string" || value.length === 0) {
+      return null;
+    }
+
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  };
+
+  const deriveAutoFlowRuntimeState = useCallback((status: any): AutoFlowRuntimeState => {
+    const stageRaw =
+      typeof status?.state === "string"
+        ? status.state
+        : typeof status?.stage === "string"
+        ? status.stage
+        : typeof status?.status === "string"
+        ? status.status
+        : "";
+    const stage = stageRaw.toLowerCase();
+    const isAwaitingConfirm =
+      stage.includes("awaiting_confirm") ||
+      (stage.includes("awaiting") && stage.includes("confirm"));
+    const deadlineAt =
+      parseDeadlineDate(status?.deadline_at) ??
+      parseDeadlineDate(status?.awaiting_confirm_deadline) ??
+      parseDeadlineDate(status?.confirm_deadline_at) ??
+      parseDeadlineDate(status?.decision_deadline) ??
+      parseDeadlineDate(status?.expires_at);
+
+    return {
+      stage,
+      isAwaitingConfirm,
+      deadlineAt,
+    };
+  }, []);
 
   const getAutoFlowPayload = useCallback(() => ({
     msm_type: "MSM4",
@@ -456,6 +506,18 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     const nextFixedReference = hasValidLlh ? candidate : null;
     setFixedBaseReference(nextFixedReference);
+  }, []);
+
+  const syncSavedBasePosition = useCallback((payload: SavedBasePositionResponse | null | undefined) => {
+    const candidate = payload?.saved ? payload.position : null;
+    const hasValidEcef =
+      candidate &&
+      typeof candidate === "object" &&
+      typeof candidate.ecef_x === "number" &&
+      typeof candidate.ecef_y === "number" &&
+      typeof candidate.ecef_z === "number";
+
+    setSavedBasePosition(hasValidEcef ? candidate : null);
   }, []);
 
   useEffect(() => {
@@ -624,25 +686,44 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, [connection.isConnected, isOfflinePreview, syncFixedReference]);
 
   useEffect(() => {
+    const refreshSavedBasePosition = () => {
+      if (isOfflinePreview || !connection.isConnected) {
+        setSavedBasePosition(null);
+        return;
+      }
+
+      api.getSavedBasePosition()
+        .then((savedPosition) => {
+          syncSavedBasePosition(savedPosition);
+        })
+        .catch(() => { });
+    };
+
+    refreshSavedBasePosition();
+    const interval = setInterval(refreshSavedBasePosition, 3000);
+    return () => clearInterval(interval);
+  }, [connection.isConnected, isOfflinePreview, syncSavedBasePosition]);
+
+  useEffect(() => {
     const syncAutoFlowStatus = () => {
       if (isOfflinePreview) {
         setIsAutoFlowActive(false);
+        setAutoFlowRuntime({ stage: "idle", isAwaitingConfirm: false, deadlineAt: null });
         return;
       }
 
       if (!connection.isConnected) {
         setIsAutoFlowActive(false);
+        setAutoFlowRuntime({ stage: "idle", isAwaitingConfirm: false, deadlineAt: null });
         return;
       }
 
       api.getAutoFlowStatus()
         .then((status) => {
-          const stage = typeof status.state === 'string'
-            ? status.state.toLowerCase()
-            : typeof status.stage === 'string'
-            ? status.stage.toLowerCase()
-            : '';
+          const nextRuntime = deriveAutoFlowRuntimeState(status);
+          const stage = nextRuntime.stage;
           const isRunningStage = !['', 'idle', 'disabled', 'stopped', 'completed', 'complete'].includes(stage);
+          setAutoFlowRuntime(nextRuntime);
           setIsAutoFlowActive(Boolean(status.enabled) && isRunningStage);
         })
         .catch(() => { });
@@ -651,7 +732,7 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
     syncAutoFlowStatus();
     const interval = setInterval(syncAutoFlowStatus, 2000);
     return () => clearInterval(interval);
-  }, [connection.isConnected, isOfflinePreview]);
+  }, [connection.isConnected, deriveAutoFlowRuntimeState, isOfflinePreview]);
 
   useEffect(() => {
     if (!isAutoFlowSessionActive) {
@@ -663,6 +744,16 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setIsAutoFlowSessionActive(false);
     }
   }, [isAutoFlowActive, isAutoFlowSessionActive, streams.ntrip.active, survey.isActive, survey.status]);
+
+  useEffect(() => {
+    if (isOfflinePreview) {
+      return;
+    }
+
+    if (streams.ntrip.active && !isAutoFlowSessionActive) {
+      setIsAutoFlowSessionActive(true);
+    }
+  }, [isAutoFlowSessionActive, isOfflinePreview, streams.ntrip.active]);
 
   const addLog = useCallback((level: 'error' | 'warning' | 'info', message: string) => {
     setLogs((prev) => [{ id: Date.now().toString() + Math.random(), timestamp: new Date(), level, message }, ...prev].slice(0, 500));
@@ -1034,6 +1125,16 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
       return;
     }
 
+    if (!configuration.baseStation.autoMode) {
+      toast.error('Auto Flow is disabled');
+      return;
+    }
+
+    if (autoFlowRuntime.isAwaitingConfirm) {
+      toast.info('Awaiting resurvey confirmation. Choose Resurvey or Skip Resurvey.');
+      return;
+    }
+
     if (isAutoFlowSessionActive || isAutoFlowActive) {
       toast.info('Auto Flow is already active. Stop it before starting again.');
       return;
@@ -1090,7 +1191,7 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setSurvey((prev) => ({ ...prev, isActive: false, status: "failed" }));
       throw error;
     }
-  }, [configuration.baseStation.surveyDuration, configuration.baseStation.accuracyThreshold, addLog, getAutoFlowPayload, isAutoFlowActive, isAutoFlowSessionActive, isOfflinePreview]);
+  }, [autoFlowRuntime.isAwaitingConfirm, configuration.baseStation.accuracyThreshold, configuration.baseStation.autoMode, configuration.baseStation.surveyDuration, addLog, getAutoFlowPayload, isAutoFlowActive, isAutoFlowSessionActive, isOfflinePreview]);
 
   /* ================= STOP SURVEY ================= */
   const stopSurvey = useCallback(async () => {
@@ -1333,6 +1434,57 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setIsFixedBaseDisplayActive(true);
     addLog('info', 'Fixed base position applied successfully');
   }, [addLog, isOfflinePreview, syncFixedReference]);
+
+  const deleteSavedPosition = useCallback(async () => {
+    if (isOfflinePreview) {
+      toast.info('Offline preview mode has no backend saved position to delete');
+      return;
+    }
+
+    await api.deleteSavedBasePosition(true);
+    setSavedBasePosition(null);
+    setFixedBaseReference(null);
+    setIsFixedBaseDisplayActive(false);
+    setConfiguration((prev) => {
+      const next = {
+        ...prev,
+        baseStation: {
+          ...prev.baseStation,
+          fixedMode: {
+            ...prev.baseStation.fixedMode,
+            enabled: false,
+            coordinates: { latitude: 0, longitude: 0, altitude: 0, accuracy: 0 },
+          },
+        },
+      };
+      persistConfiguration(next);
+      return next;
+    });
+    addLog('warning', 'Saved base position deleted');
+  }, [addLog, isOfflinePreview, persistConfiguration]);
+
+  const confirmResurvey = useCallback(async () => {
+    if (isOfflinePreview) {
+      toast.info('Offline preview mode does not confirm backend resurvey');
+      return;
+    }
+
+    await api.confirmResurvey();
+    addLog('info', 'Resurvey confirmed by operator');
+    setAutoFlowRuntime((prev) => ({ ...prev, isAwaitingConfirm: false, deadlineAt: null }));
+    setIsAutoFlowSessionActive(true);
+  }, [addLog, isOfflinePreview]);
+
+  const skipResurvey = useCallback(async () => {
+    if (isOfflinePreview) {
+      toast.info('Offline preview mode does not skip backend resurvey');
+      return;
+    }
+
+    await api.skipResurvey();
+    addLog('info', 'Operator skipped resurvey and kept saved position');
+    setAutoFlowRuntime((prev) => ({ ...prev, isAwaitingConfirm: false, deadlineAt: null }));
+  }, [addLog, isOfflinePreview]);
 
   const clearLogs = useCallback(() => setLogs([]), []);
   const exportHistoryCSV = useCallback(async () => {}, []);
@@ -1742,7 +1894,9 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
       enterOfflinePreview,
       exitOfflinePreview,
       isAutoFlowSessionActive,
+      autoFlowRuntime,
       fixedBaseReference,
+      savedBasePosition,
       isFixedBaseDisplayActive,
       applyFixedBasePosition,
       setFixedBaseDisplayActive: setIsFixedBaseDisplayActive,
@@ -1774,8 +1928,11 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
       exportLogsCSV,
       startNTRIP,
       stopNTRIP,
+      deleteSavedPosition,
+      confirmResurvey,
+      skipResurvey,
     }),
-    [connection, isOfflinePreview, isAutoFlowSessionActive, fixedBaseReference, isFixedBaseDisplayActive, survey, isAutoFlowActive, gnssStatus, streams, configuration, settings, surveyHistory, logs, enterOfflinePreview, exitOfflinePreview, applyFixedBasePosition, connectToDevice, disconnect, startSurvey, stopSurvey, toggleStream, updateConfiguration, updateSettings, scanWiFi, scanBLE, addLog, clearLogs, deleteLogs, clearSurveyHistory, deleteSurveys, exportHistoryCSV, exportLogsCSV, startNTRIP, stopNTRIP]
+    [connection, isOfflinePreview, isAutoFlowSessionActive, autoFlowRuntime, fixedBaseReference, savedBasePosition, isFixedBaseDisplayActive, survey, isAutoFlowActive, gnssStatus, streams, configuration, settings, surveyHistory, logs, enterOfflinePreview, exitOfflinePreview, applyFixedBasePosition, connectToDevice, disconnect, startSurvey, stopSurvey, toggleStream, updateConfiguration, updateSettings, scanWiFi, scanBLE, addLog, clearLogs, deleteLogs, clearSurveyHistory, deleteSurveys, exportHistoryCSV, exportLogsCSV, startNTRIP, stopNTRIP, deleteSavedPosition, confirmResurvey, skipResurvey]
   );
 
   return (

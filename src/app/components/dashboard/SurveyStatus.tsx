@@ -530,49 +530,82 @@ interface AccuracyRecord {
 }
 
 export const SurveyStatus: React.FC = () => {
-  const { survey, startSurvey, stopSurvey, configuration, gnssStatus, streams, isAutoFlowActive, isAutoFlowSessionActive, fixedBaseReference, isFixedBaseDisplayActive } = useGNSS();
+  const { survey, startSurvey, stopSurvey, configuration, gnssStatus, streams, isAutoFlowActive, isAutoFlowSessionActive, autoFlowRuntime, savedBasePosition, fixedBaseReference, confirmResurvey, skipResurvey } = useGNSS();
   const [coordinateFormat, setCoordinateFormat] = useState<'Global' | 'Local'>('Global');
   const [isLoading, setIsLoading] = useState(false);
   const [accuracyHistory, setAccuracyHistory] = useState<AccuracyRecord[]>([]);
   const [finalAccuracyRecord, setFinalAccuracyRecord] = useState<AccuracyRecord | null>(null);
   const [showAccuracyHistory, setShowAccuracyHistory] = useState(false);
   const [displayElapsedTime, setDisplayElapsedTime] = useState(0);
+  const [smoothElapsedTime, setSmoothElapsedTime] = useState(0);
+  const [confirmCountdown, setConfirmCountdown] = useState<number | null>(null);
   const prevIsActiveRef = useRef(survey.isActive);
   const prevStatusRef = useRef(survey.status);
   const startToastIdRef = useRef<string>('survey-start-loading');
   const [progressPercentage, setProgressPercentage] = useState(0);
+  const lastUpdateTimeRef = useRef(Date.now());
+  const smoothTimerRef = useRef<NodeJS.Timeout | null>(null);
   const hasMetTargetAccuracy = survey.valid || (survey.currentAccuracy > 0 && survey.currentAccuracy <= survey.targetAccuracy);
   const showFixedIndicators = !survey.isActive && survey.status !== 'stopped' && hasMetTargetAccuracy;
   const requiredTimeSecs = survey.isActive ? survey.requiredTime : configuration.baseStation.surveyDuration;
-  const fixedBasePosition = isFixedBaseDisplayActive && configuration.baseStation.fixedMode.enabled && fixedBaseReference?.llh
-    ? {
-        latitude: fixedBaseReference.llh.latitude,
-        longitude: fixedBaseReference.llh.longitude,
-        altitude: fixedBaseReference.llh.height_ellipsoid,
-        accuracy: fixedBaseReference.fixed_pos_acc,
-      }
-    : null;
   const isFlowRunning = survey.isActive || survey.status === 'initializing' || isAutoFlowActive || isAutoFlowSessionActive;
 
+  // Smooth timer update logic
   useEffect(() => {
     const justStarted = survey.isActive && !prevIsActiveRef.current;
     prevIsActiveRef.current = survey.isActive;
 
     if (survey.status === 'initializing') {
       setDisplayElapsedTime(0);
+      setSmoothElapsedTime(0);
+      if (smoothTimerRef.current) {
+        clearInterval(smoothTimerRef.current);
+        smoothTimerRef.current = null;
+      }
       return;
     }
 
     if (survey.isActive || justStarted) {
       setDisplayElapsedTime(survey.elapsedTime);
+      setSmoothElapsedTime(survey.elapsedTime);
+      lastUpdateTimeRef.current = Date.now();
+      
+      // Start smooth timer if not already running
+      if (!smoothTimerRef.current) {
+        smoothTimerRef.current = setInterval(() => {
+          const now = Date.now();
+          const elapsed = (now - lastUpdateTimeRef.current) / 1000;
+          setSmoothElapsedTime(prev => {
+            const next = prev + elapsed;
+            return Math.min(next, requiredTimeSecs);
+          });
+          lastUpdateTimeRef.current = now;
+        }, 100); // Update every 100ms for smooth display
+      }
       return;
+    }
+
+    // Survey stopped - clean up smooth timer
+    if (smoothTimerRef.current) {
+      clearInterval(smoothTimerRef.current);
+      smoothTimerRef.current = null;
     }
 
     const settledElapsed = Math.min(survey.elapsedTime, requiredTimeSecs);
     setDisplayElapsedTime(settledElapsed);
+    setSmoothElapsedTime(settledElapsed);
   }, [survey.elapsedTime, survey.isActive, survey.status, requiredTimeSecs]);
 
-  const clampedElapsedTime = Math.min(displayElapsedTime, requiredTimeSecs);
+  // Clean up smooth timer on unmount
+  useEffect(() => {
+    return () => {
+      if (smoothTimerRef.current) {
+        clearInterval(smoothTimerRef.current);
+      }
+    };
+  }, []);
+
+  const clampedElapsedTime = Math.min(smoothElapsedTime, requiredTimeSecs);
 
   useEffect(() => {
     const prevStatus = prevStatusRef.current;
@@ -611,6 +644,22 @@ export const SurveyStatus: React.FC = () => {
     setProgressPercentage(percentage);
   }, [clampedElapsedTime, requiredTimeSecs]);
 
+  useEffect(() => {
+    if (!autoFlowRuntime.isAwaitingConfirm || !autoFlowRuntime.deadlineAt) {
+      setConfirmCountdown(null);
+      return;
+    }
+
+    const updateCountdown = () => {
+      const remainingMs = autoFlowRuntime.deadlineAt!.getTime() - Date.now();
+      setConfirmCountdown(Math.max(0, Math.ceil(remainingMs / 1000)));
+    };
+
+    updateCountdown();
+    const interval = setInterval(updateCountdown, 1000);
+    return () => clearInterval(interval);
+  }, [autoFlowRuntime.deadlineAt, autoFlowRuntime.isAwaitingConfirm]);
+
   const surveWasActiveRef = useRef(false);
   useEffect(() => {
     if (!survey.isActive && surveWasActiveRef.current === true) {
@@ -628,44 +677,84 @@ export const SurveyStatus: React.FC = () => {
     return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
-  const formatCoordinate = () => {
-    const lat = fixedBasePosition?.latitude ?? gnssStatus.globalPosition.latitude ?? survey.position.latitude;
-    const lon = fixedBasePosition?.longitude ?? gnssStatus.globalPosition.longitude ?? survey.position.longitude;
-    const alt = fixedBasePosition?.altitude ?? gnssStatus.globalPosition.altitude ?? survey.position.altitude;
+  // Coordinate conversion functions
+  const ecefToLlh = (x: number, y: number, z: number) => {
+    // Simplified ECEF to LLH conversion for display purposes
+    const a = 6378137.0; // WGS84 semi-major axis
+    const e2 = 0.00669437999014; // WGS84 eccentricity squared
+    
+    const p = Math.sqrt(x * x + y * y);
+    const theta = Math.atan2(z * a, p * Math.sqrt(1 - e2 * z * z));
+    
+    let lat = Math.atan2(z + e2 * a * Math.pow(Math.sin(theta), 3), 
+                         p - e2 * a * Math.pow(Math.cos(theta), 3));
+    let lon = Math.atan2(y, x);
+    
+    const N = a / Math.sqrt(1 - e2 * Math.sin(lat) * Math.sin(lat));
+    let alt = p / Math.cos(lat) - N;
+    
+    return { lat: lat * 180 / Math.PI, lon: lon * 180 / Math.PI, alt };
+  };
 
+  const llhToEcef = (lat: number, lon: number, alt: number) => {
+    // Simplified LLH to ECEF conversion for display purposes
+    const a = 6378137.0; // WGS84 semi-major axis
+    const e2 = 0.00669437999014; // WGS84 eccentricity squared
+    
+    const latRad = lat * Math.PI / 180;
+    const lonRad = lon * Math.PI / 180;
+    
+    const N = a / Math.sqrt(1 - e2 * Math.sin(latRad) * Math.sin(latRad));
+    
+    const x = (N + alt) * Math.cos(latRad) * Math.cos(lonRad);
+    const y = (N + alt) * Math.cos(latRad) * Math.sin(lonRad);
+    const z = (N * (1 - e2) + alt) * Math.sin(latRad);
+    
+    return { x, y, z };
+  };
+
+  const formatCoordinate = () => {
     if (coordinateFormat === 'Global') {
       return {
-        lat: lat && !isNaN(lat) && lat !== 0 ? lat.toFixed(8) : 'NIL',
-        lon: lon && !isNaN(lon) && lon !== 0 ? lon.toFixed(8) : 'NIL',
-        alt: alt && !isNaN(alt) && alt !== 0 ? alt.toFixed(3) : 'NIL',
-      };
-    } else {
-      let finalX = survey.localCoordinates.meanX;
-      let finalY = survey.localCoordinates.meanY;
-      let finalZ = survey.localCoordinates.meanZ;
-
-      if ((!finalX || isNaN(finalX) || finalX === 0) && (!finalY || isNaN(finalY) || finalY === 0) && lat !== 0 && lon !== 0) {
-        finalX = (lon * 20037508.34) / 180;
-        const rad = (lat * Math.PI) / 180;
-        finalY = (Math.log(Math.tan((Math.PI / 4) + (rad / 2))) * (20037508.34 / Math.PI));
-        finalZ = alt;
-      }
-
-      const isValidX = finalX !== undefined && finalX !== null && !isNaN(finalX) && finalX !== 0;
-      const isValidY = finalY !== undefined && finalY !== null && !isNaN(finalY) && finalY !== 0;
-      const isValidZ = finalZ !== undefined && finalZ !== null && !isNaN(finalZ) && finalZ !== 0;
-
-      return {
-        lat: isValidX ? finalX.toFixed(4) : 'NIL',
-        lon: isValidY ? finalY.toFixed(4) : 'NIL',
-        alt: isValidZ ? finalZ.toFixed(4) : 'NIL',
+        lat: Number.isFinite(gnssStatus.globalPosition.latitude) && gnssStatus.globalPosition.latitude !== 0 ? gnssStatus.globalPosition.latitude.toFixed(8) : 'NIL',
+        lon: Number.isFinite(gnssStatus.globalPosition.longitude) && gnssStatus.globalPosition.longitude !== 0 ? gnssStatus.globalPosition.longitude.toFixed(8) : 'NIL',
+        alt: Number.isFinite(gnssStatus.globalPosition.altitude) && gnssStatus.globalPosition.altitude !== 0 ? gnssStatus.globalPosition.altitude.toFixed(3) : 'NIL',
       };
     }
+
+    // For Local format, show converted coordinates from saved position or current position
+    if (savedBasePosition) {
+      return {
+        lat: savedBasePosition.ecef_x.toFixed(4),
+        lon: savedBasePosition.ecef_y.toFixed(4),
+        alt: savedBasePosition.ecef_z.toFixed(4),
+      };
+    } else if (fixedBaseReference) {
+      // Convert fixed base LLH to ECEF for display consistency
+      const ecef = llhToEcef(fixedBaseReference.llh.latitude, fixedBaseReference.llh.longitude, fixedBaseReference.llh.height_ellipsoid);
+      return {
+        lat: ecef.x.toFixed(4),
+        lon: ecef.y.toFixed(4),
+        alt: ecef.z.toFixed(4),
+      };
+    } else if (gnssStatus.globalPosition.latitude !== 0 && gnssStatus.globalPosition.longitude !== 0) {
+      // Convert current global position to ECEF for display
+      const ecef = llhToEcef(gnssStatus.globalPosition.latitude, gnssStatus.globalPosition.longitude, gnssStatus.globalPosition.altitude);
+      return {
+        lat: ecef.x.toFixed(4),
+        lon: ecef.y.toFixed(4),
+        alt: ecef.z.toFixed(4),
+      };
+    }
+
+    return {
+      lat: 'NIL',
+      lon: 'NIL',
+      alt: 'NIL',
+    };
   };
 
   const coords = formatCoordinate();
-  const displayedPositionAccuracy = fixedBasePosition?.accuracy
-    ?? (survey.position.accuracy > 0 ? survey.position.accuracy : gnssStatus.globalPosition.horizontalAccuracy);
 
   const copyCoordinates = () => {
     const coordText = `${coordinateFormat}: Lat/X: ${coords.lat}, Lon/Y: ${coords.lon}, Alt/Z: ${coords.alt}m`;
@@ -716,6 +805,7 @@ export const SurveyStatus: React.FC = () => {
   };
 
   const getDisplayStatus = () => {
+    if (autoFlowRuntime.isAwaitingConfirm) return 'Awaiting Confirm';
     if (survey.isActive) return 'In Progress';
     if (survey.status === 'initializing') return 'Initializing';
     if (!survey.isActive && streams.ntrip.active && (isAutoFlowSessionActive || isAutoFlowActive)) return 'Streaming';
@@ -724,7 +814,32 @@ export const SurveyStatus: React.FC = () => {
     return 'Idle';
   };
 
+  const handleConfirmResurvey = async () => {
+    try {
+      setIsLoading(true);
+      await confirmResurvey();
+      toast.success('Resurvey confirmed');
+    } catch (error) {
+      toast.error(`Failed to confirm resurvey: ${String(error)}`);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleSkipResurvey = async () => {
+    try {
+      setIsLoading(true);
+      await skipResurvey();
+      toast.success('Saved position kept');
+    } catch (error) {
+      toast.error(`Failed to skip resurvey: ${String(error)}`);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   const getStatusBadgeColor = () => {
+    if (autoFlowRuntime.isAwaitingConfirm) return 'bg-violet-600 text-white';
     if (survey.isActive) return survey.status === 'initializing' ? 'bg-blue-500 text-white' : 'bg-amber-500 text-white';
     if (survey.status === 'initializing') return 'bg-blue-500 text-white';
     if (!survey.isActive && streams.ntrip.active && (isAutoFlowSessionActive || isAutoFlowActive)) return 'bg-emerald-500 text-white';
@@ -746,11 +861,17 @@ export const SurveyStatus: React.FC = () => {
     }
   }, [survey.isActive, survey.currentAccuracy, clampedElapsedTime]);
 
-  const displayAccuracy = survey.currentAccuracy > 0
-    ? survey.currentAccuracy
-    : !survey.isActive && lockedAccuracy.current > 0
-    ? lockedAccuracy.current
+  const livePositionAccuracyCm = gnssStatus.globalPosition.horizontalAccuracy > 0
+    ? gnssStatus.globalPosition.horizontalAccuracy * 100
     : 0;
+  const savedPositionAccuracyCm = savedBasePosition?.accuracy && savedBasePosition.accuracy > 0
+    ? savedBasePosition.accuracy * 100
+    : 0;
+  const displayAccuracy = survey.isActive || survey.status === 'initializing'
+    ? (livePositionAccuracyCm > 0 ? livePositionAccuracyCm : survey.currentAccuracy)
+    : (savedPositionAccuracyCm > 0
+      ? savedPositionAccuracyCm
+      : (!survey.isActive && lockedAccuracy.current > 0 ? lockedAccuracy.current : 0));
   const displaySatelliteCount = survey.satelliteCount > 0
     ? survey.satelliteCount
     : gnssStatus.satellites.length > 0
@@ -807,6 +928,16 @@ export const SurveyStatus: React.FC = () => {
               </div>
             </div>
           </div>
+
+          {/* Base is Fixed Status Display */}
+          {savedBasePosition && !isFlowRunning && !autoFlowRuntime.isAwaitingConfirm && (
+            <div className="flex items-center justify-center mt-4 mb-2">
+              <div className="flex items-center gap-2 px-4 py-2 bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-800 rounded-full">
+                <CheckCircle2 className="size-4 text-emerald-600 dark:text-emerald-400" />
+                <span className="text-sm font-semibold text-emerald-700 dark:text-emerald-300">Base is Fixed</span>
+              </div>
+            </div>
+          )}
 
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <div className="text-center p-4 rounded-xl bg-slate-50 dark:bg-slate-950/50 border border-slate-200 dark:border-slate-800/80">
@@ -873,8 +1004,37 @@ export const SurveyStatus: React.FC = () => {
             </Dialog>
           </div>
 
+          {autoFlowRuntime.isAwaitingConfirm && (
+            <div className="rounded-xl border border-violet-200 dark:border-violet-900/40 bg-violet-50 dark:bg-violet-950/20 px-4 py-3 text-sm text-violet-900 dark:text-violet-100">
+              <div className="font-semibold">Position change detected. Confirm resurvey or keep the saved position.</div>
+              <div className="mt-1 text-xs font-medium text-violet-700 dark:text-violet-300">
+                {confirmCountdown !== null
+                  ? `Time remaining: ${Math.floor(confirmCountdown / 60)}:${String(confirmCountdown % 60).padStart(2, '0')}`
+                  : 'Waiting for backend confirmation window.'}
+              </div>
+            </div>
+          )}
+
           <div className="flex gap-3">
-            {!isFlowRunning ? (
+            {autoFlowRuntime.isAwaitingConfirm ? (
+              <>
+                <Button
+                  onClick={handleConfirmResurvey}
+                  className="flex-1 gap-2 bg-violet-600 hover:bg-violet-700 text-white"
+                  disabled={isLoading}
+                >
+                  <Play className="size-4" /> Resurvey
+                </Button>
+                <Button
+                  onClick={handleSkipResurvey}
+                  variant="outline"
+                  className="flex-1 gap-2 border-slate-300 dark:border-slate-700"
+                  disabled={isLoading}
+                >
+                  <Square className="size-4" /> Skip Resurvey
+                </Button>
+              </>
+            ) : !isFlowRunning ? (
               <Button
                 onClick={handleStartSurvey}
                 className="flex-1 gap-2 bg-blue-600 hover:bg-blue-700 text-white"
@@ -892,7 +1052,7 @@ export const SurveyStatus: React.FC = () => {
       </Card>
 
       {/* ⭐ MINIMAL, TECHNICAL NTRIP STATUS STRIP */}
-      {streams?.ntrip?.active && (
+      {(streams?.ntrip?.active || (streams?.ntrip?.enabled && (isAutoFlowSessionActive || isAutoFlowActive))) && (
         <Card className="bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 shadow-sm relative overflow-hidden animate-in fade-in slide-in-from-bottom-2">
           
           {/* Subtle loading bar running continuously along the top border */}
@@ -964,11 +1124,7 @@ export const SurveyStatus: React.FC = () => {
               <div>
                 <CardTitle className="text-base text-slate-900 dark:text-slate-50 uppercase tracking-wide">Position Data</CardTitle>
                 <CardDescription className="text-[10px] font-mono text-slate-500 dark:text-slate-400 mt-0.5">
-                  {coordinateFormat === 'Global'
-                    ? fixedBasePosition
-                      ? 'GLOBAL_FIXED_REF'
-                      : 'GLOBAL_GNSS_RX'
-                    : 'LOCAL_SURVEY_PROC'}
+                  {coordinateFormat === 'Global' ? 'GLOBAL_STATUS_POSITION' : 'LOCAL_SAVED_ECEF'}
                 </CardDescription>
               </div>
             </div>
@@ -999,21 +1155,21 @@ export const SurveyStatus: React.FC = () => {
               
               <div className="flex items-center justify-between p-3 hover:bg-slate-50 dark:hover:bg-slate-900/50 transition-colors">
                 <div className="text-[10px] font-bold text-slate-400 w-24 shrink-0">
-                  {coordinateFormat === 'Global' ? 'LAT' : 'EAST (X)'}
+                  {coordinateFormat === 'Global' ? 'LAT' : 'ECEF X'}
                 </div>
                 <div className="text-lg font-bold text-slate-900 dark:text-slate-100 truncate">{coords.lat}</div>
               </div>
 
               <div className="flex items-center justify-between p-3 hover:bg-slate-50 dark:hover:bg-slate-900/50 transition-colors">
                 <div className="text-[10px] font-bold text-slate-400 w-24 shrink-0">
-                  {coordinateFormat === 'Global' ? 'LON' : 'NORTH (Y)'}
+                  {coordinateFormat === 'Global' ? 'LON' : 'ECEF Y'}
                 </div>
                 <div className="text-lg font-bold text-slate-900 dark:text-slate-100 truncate">{coords.lon}</div>
               </div>
 
               <div className="flex items-center justify-between p-3 hover:bg-slate-50 dark:hover:bg-slate-900/50 transition-colors bg-slate-50 dark:bg-slate-900/30">
                 <div className="text-[10px] font-bold text-slate-400 w-24 shrink-0">
-                  {coordinateFormat === 'Global' ? 'ALT (MSL)' : 'HEIGHT (Z)'}
+                  {coordinateFormat === 'Global' ? 'ALT (MSL)' : 'ECEF Z'}
                 </div>
                 <div className="text-lg font-bold text-slate-900 dark:text-slate-100 truncate">
                   {coords.alt} <span className="text-xs text-slate-500 font-normal">m</span>

@@ -46,6 +46,28 @@ export const api = {
   getStatus: async () => fetch(`${requireApiBase()}/api/v1/status`).then(handleResponse),
   getStatusPosition: async () => fetch(`${requireApiBase()}/api/v1/status/position`).then(handleResponse),
   getStatusBaseReference: async () => fetch(`${requireApiBase()}/api/v1/status/base-reference`).then(handleResponse),
+  getSavedBasePosition: async () => fetch(`${requireApiBase()}/api/v1/base/saved-position`).then(handleResponse),
+  deleteSavedBasePosition: async (confirm: boolean = true) => {
+    const base = requireApiBase();
+    return fetch(`${base}/api/v1/base/saved-position?confirm=${confirm ? "true" : "false"}`, {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+    }).then(handleResponse);
+  },
+  confirmResurvey: async () => {
+    const base = requireApiBase();
+    return fetch(`${base}/api/v1/base/confirm-resurvey`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    }).then(handleResponse);
+  },
+  skipResurvey: async () => {
+    const base = requireApiBase();
+    return fetch(`${base}/api/v1/base/skip-resurvey`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    }).then(handleResponse);
+  },
   getStatusSurvey: async () => fetch(`${requireApiBase()}/api/v1/status/survey`).then(handleResponse),
   getSurvey: async () => fetch(`${requireApiBase()}/api/v1/survey`).then(handleResponse),
   getSurveyStatus: async () => {

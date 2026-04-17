@@ -109,6 +109,25 @@ export interface BaseReferenceStatus {
   survey_reference: Record<string, unknown> | null;
 }
 
+export interface SavedBasePosition {
+  ecef_x: number;
+  ecef_y: number;
+  ecef_z: number;
+  accuracy: number;
+  surveyed_at: string;
+}
+
+export interface SavedBasePositionResponse {
+  saved: boolean;
+  position: SavedBasePosition | null;
+}
+
+export interface AutoFlowRuntimeState {
+  stage: string;
+  isAwaitingConfirm: boolean;
+  deadlineAt: Date | null;
+}
+
 /* ================= STREAMS ================= */
 
 export interface StreamInfo {
