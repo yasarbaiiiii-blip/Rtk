@@ -552,20 +552,28 @@ export const SurveyStatus: React.FC = () => {
   const [displayElapsedTime, setDisplayElapsedTime] = useState(0);
   const [smoothElapsedTime, setSmoothElapsedTime] = useState(0);
   const [confirmCountdown, setConfirmCountdown] = useState<number | null>(null);
+  const [pendingAction, setPendingAction] = useState<'start' | 'stop' | 'decision' | null>(null);
   const prevIsActiveRef = useRef(survey.isActive);
   const prevStatusRef = useRef(survey.status);
   const startToastIdRef = useRef<string>('survey-start-loading');
   const isStartToastOpenRef = useRef(false);
-  const pendingActionRef = useRef<'start' | 'stop' | 'decision' | null>(null);
   const [progressPercentage, setProgressPercentage] = useState(0);
   const surveyStartedAtRef = useRef<number | null>(null);
   const hasMetTargetAccuracy = survey.valid || (survey.currentAccuracy > 0 && survey.currentAccuracy <= survey.targetAccuracy);
   const showFixedIndicators = !survey.isActive && survey.status !== 'stopped' && hasMetTargetAccuracy;
   const hasAutoFlowControl = isAutoFlowActive || isAutoFlowSessionActive;
-  const isStreamingConnected = streams.ntrip.active || (streams.ntrip.enabled && hasAutoFlowControl);
+  const isNtripStreaming = streams.ntrip.active;
+  const isStreamingConnected = isNtripStreaming || (streams.ntrip.enabled && hasAutoFlowControl);
   const showBaseFixedBanner = Boolean(savedBasePosition) && !autoFlowRuntime.isAwaitingConfirm && !survey.isActive;
-  const shouldShowStreamingState = isStreamingConnected && !survey.isActive;
+  const shouldShowStreamingState = isNtripStreaming && !survey.isActive;
   const isFixedBaseState = showBaseFixedBanner || showFixedIndicators;
+  const shouldShowStartLoadingToast =
+    pendingAction === 'start' &&
+    survey.status === 'initializing' &&
+    !survey.isActive &&
+    !shouldShowStreamingState &&
+    !isFixedBaseState &&
+    !autoFlowRuntime.isAwaitingConfirm;
   const shouldShowStopButton = !autoFlowRuntime.isAwaitingConfirm && (
     survey.isActive ||
     survey.status === 'initializing' ||
@@ -619,70 +627,26 @@ export const SurveyStatus: React.FC = () => {
   const clampedElapsedTime = Math.min(smoothElapsedTime, requiredTimeSecs);
 
   useEffect(() => {
-    const prevStatus = prevStatusRef.current;
-    const becameRunning = prevStatus !== 'in-progress' && survey.status === 'in-progress';
-    const justEnteredInitializing = prevStatus !== 'initializing' && survey.status === 'initializing';
-    const justFailed = prevStatus !== 'failed' && survey.status === 'failed';
-    const resolvedToFixed = !survey.isActive && (showFixedIndicators || showBaseFixedBanner);
-    const resolvedToStreaming = !survey.isActive && isStreamingConnected;
-    const resolvedToConfirm = autoFlowRuntime.isAwaitingConfirm;
-    const leftInitializing = !survey.isActive && survey.status !== 'initializing' && prevStatus === 'initializing';
-
-    if (justEnteredInitializing) {
-      toast.dismiss(startToastIdRef.current);
-      toast.loading('Starting survey...', { id: startToastIdRef.current });
-      isStartToastOpenRef.current = true;
+    if (shouldShowStartLoadingToast) {
+      if (!isStartToastOpenRef.current) {
+        toast.loading('Starting survey...', { id: startToastIdRef.current });
+        isStartToastOpenRef.current = true;
+      }
+      return;
     }
 
-    if (becameRunning) {
+    if (isStartToastOpenRef.current) {
       toast.dismiss(startToastIdRef.current);
       isStartToastOpenRef.current = false;
-      uiLogger.log('Survey Started Successfully', 'SurveyStatus');
-      toast.success('Survey started');
-      setIsLoading(false);
     }
-
-    if (justFailed) {
-      toast.dismiss(startToastIdRef.current);
-      isStartToastOpenRef.current = false;
-      setIsLoading(false);
-    }
-
-    if (isStartToastOpenRef.current && resolvedToFixed) {
-      toast.dismiss(startToastIdRef.current);
-      isStartToastOpenRef.current = false;
-      setIsLoading(false);
-    }
-
-    if (isStartToastOpenRef.current && resolvedToStreaming) {
-      toast.dismiss(startToastIdRef.current);
-      isStartToastOpenRef.current = false;
-      toast.success('Survey skipped. Streaming started with the fixed base.');
-      setIsLoading(false);
-    }
-
-    if (isStartToastOpenRef.current && resolvedToConfirm) {
-      toast.dismiss(startToastIdRef.current);
-      isStartToastOpenRef.current = false;
-      toast.info('Position changed. Choose Resurvey or Skip Resurvey.');
-      setIsLoading(false);
-    }
-
-    if (isStartToastOpenRef.current && leftInitializing) {
-      toast.dismiss(startToastIdRef.current);
-      isStartToastOpenRef.current = false;
-      setIsLoading(false);
-    }
-
-    prevStatusRef.current = survey.status;
-  }, [autoFlowRuntime.isAwaitingConfirm, isStreamingConnected, showBaseFixedBanner, showFixedIndicators, survey.status, survey.isActive]);
+  }, [shouldShowStartLoadingToast]);
 
   useEffect(() => {
     if (!isStartToastOpenRef.current) {
       return;
     }
 
-    const isStillStarting = pendingActionRef.current === 'start' && (survey.status === 'initializing' || survey.isActive);
+    const isStillStarting = pendingAction === 'start' && (survey.status === 'initializing' || survey.isActive);
     if (isStillStarting) {
       return;
     }
@@ -698,7 +662,7 @@ export const SurveyStatus: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    if (pendingActionRef.current === 'start') {
+    if (pendingAction === 'start') {
       const startSettled =
         survey.status === 'in-progress' ||
         autoFlowRuntime.isAwaitingConfirm ||
@@ -708,13 +672,22 @@ export const SurveyStatus: React.FC = () => {
         survey.status === 'failed';
 
       if (startSettled) {
-        pendingActionRef.current = null;
+        if (survey.status === 'in-progress') {
+          uiLogger.log('Survey Started Successfully', 'SurveyStatus');
+          toast.success('Survey started');
+        } else if (shouldShowStreamingState) {
+          toast.success('Streaming started');
+        } else if (autoFlowRuntime.isAwaitingConfirm) {
+          toast.info('Position changed. Choose Resurvey or Skip Resurvey.');
+        }
+
+        setPendingAction(null);
         setIsLoading(false);
       }
       return;
     }
 
-    if (pendingActionRef.current === 'stop') {
+    if (pendingAction === 'stop') {
       const stopSettled =
         survey.status === 'stopped' &&
         !survey.isActive &&
@@ -723,15 +696,15 @@ export const SurveyStatus: React.FC = () => {
         !streams.ntrip.active;
 
       if (stopSettled) {
-        pendingActionRef.current = null;
+        setPendingAction(null);
         setIsLoading(false);
       }
       return;
     }
 
-    if (pendingActionRef.current === 'decision') {
+    if (pendingAction === 'decision') {
       if (!autoFlowRuntime.isAwaitingConfirm) {
-        pendingActionRef.current = null;
+        setPendingAction(null);
         setIsLoading(false);
       }
     }
@@ -739,6 +712,7 @@ export const SurveyStatus: React.FC = () => {
     autoFlowRuntime.isAwaitingConfirm,
     isAutoFlowActive,
     isAutoFlowSessionActive,
+    pendingAction,
     shouldShowStreamingState,
     showBaseFixedBanner,
     showFixedIndicators,
@@ -822,7 +796,7 @@ export const SurveyStatus: React.FC = () => {
 
   const handleStartSurvey = async () => {
     try {
-      pendingActionRef.current = 'start';
+      setPendingAction('start');
       setIsLoading(true);
       setAccuracyHistory([]);
       setFinalAccuracyRecord(null);
@@ -833,7 +807,7 @@ export const SurveyStatus: React.FC = () => {
 
       await startSurvey();
     } catch (error) {
-      pendingActionRef.current = null;
+      setPendingAction(null);
       const errorMsg = error instanceof Error ? error.message : String(error);
       toast.dismiss(startToastIdRef.current);
       isStartToastOpenRef.current = false;
@@ -847,7 +821,7 @@ export const SurveyStatus: React.FC = () => {
     try {
       toast.dismiss(startToastIdRef.current);
       isStartToastOpenRef.current = false;
-      pendingActionRef.current = 'stop';
+      setPendingAction('stop');
       setIsLoading(true);
       uiLogger.log('Stop Survey Button Clicked', 'SurveyStatus', {
         elapsedTime: survey.elapsedTime,
@@ -859,12 +833,12 @@ export const SurveyStatus: React.FC = () => {
       uiLogger.log('Survey Stopped Successfully', 'SurveyStatus');
       toast.success('Survey stopped');
     } catch (error) {
-      pendingActionRef.current = null;
+      setPendingAction(null);
       const errorMsg = error instanceof Error ? error.message : String(error);
       uiLogger.log('Stop Survey Failed', 'SurveyStatus', undefined, errorMsg);
       toast.error(`Failed to stop survey: ${errorMsg}`);
     } finally {
-      if (pendingActionRef.current !== 'stop') {
+      if (pendingAction !== 'stop') {
         setIsLoading(false);
       }
     }
@@ -882,15 +856,15 @@ export const SurveyStatus: React.FC = () => {
 
   const handleConfirmResurvey = async () => {
     try {
-      pendingActionRef.current = 'decision';
+      setPendingAction('decision');
       setIsLoading(true);
       await confirmResurvey();
       toast.success('Resurvey confirmed');
     } catch (error) {
-      pendingActionRef.current = null;
+      setPendingAction(null);
       toast.error(`Failed to confirm resurvey: ${String(error)}`);
     } finally {
-      if (pendingActionRef.current !== 'decision') {
+      if (pendingAction !== 'decision') {
         setIsLoading(false);
       }
     }
@@ -898,15 +872,15 @@ export const SurveyStatus: React.FC = () => {
 
   const handleSkipResurvey = async () => {
     try {
-      pendingActionRef.current = 'decision';
+      setPendingAction('decision');
       setIsLoading(true);
       await skipResurvey();
       toast.success('Saved position kept');
     } catch (error) {
-      pendingActionRef.current = null;
+      setPendingAction(null);
       toast.error(`Failed to skip resurvey: ${String(error)}`);
     } finally {
-      if (pendingActionRef.current !== 'decision') {
+      if (pendingAction !== 'decision') {
         setIsLoading(false);
       }
     }
@@ -957,7 +931,7 @@ export const SurveyStatus: React.FC = () => {
     <div className="space-y-6">
       
       {/* ── SURVEY STATUS CARD ── */}
-      <Card className="bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 shadow-sm">
+      <Card className={`${isFixedBaseState ? 'bg-slate-50 dark:bg-slate-950/80 border-slate-300 dark:border-slate-700' : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800'} shadow-sm transition-colors`}>
         <CardHeader className="space-y-4">
           <div className="flex items-center justify-between">
             <div>
@@ -973,13 +947,21 @@ export const SurveyStatus: React.FC = () => {
 
           {showBaseFixedBanner && (
             <div className="flex items-center justify-start">
-              <div className="grid min-w-[240px] gap-1 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm dark:border-slate-800 dark:bg-slate-950/60">
+              <div className="grid min-w-[260px] gap-2 rounded-2xl border border-slate-300 bg-white px-4 py-3 text-sm shadow-sm dark:border-slate-700 dark:bg-slate-900">
                 <div className="flex items-center gap-2 text-slate-900 dark:text-slate-100">
                   <CheckCircle2 className="size-4 text-emerald-600 dark:text-emerald-400" />
                   <span className="font-medium">Base is Fixed</span>
                 </div>
+                <div className="grid grid-cols-2 gap-2 text-xs">
+                  <div className="rounded-xl bg-slate-50 px-3 py-2 text-slate-600 dark:bg-slate-800/80 dark:text-slate-300">
+                    Mode: Fixed Base
+                  </div>
+                  <div className="rounded-xl bg-slate-50 px-3 py-2 text-slate-600 dark:bg-slate-800/80 dark:text-slate-300">
+                    Status: Ready
+                  </div>
+                </div>
                 <div className="text-xs text-slate-500 dark:text-slate-400">
-                  Stored base position is active. Start the flow to continue with corrections.
+                  Stored base reference is active. Start the flow to publish corrections.
                 </div>
               </div>
             </div>
