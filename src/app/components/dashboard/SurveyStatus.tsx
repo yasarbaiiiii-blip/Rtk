@@ -555,6 +555,8 @@ export const SurveyStatus: React.FC = () => {
   const prevIsActiveRef = useRef(survey.isActive);
   const prevStatusRef = useRef(survey.status);
   const startToastIdRef = useRef<string>('survey-start-loading');
+  const isStartToastOpenRef = useRef(false);
+  const pendingActionRef = useRef<'start' | 'stop' | 'decision' | null>(null);
   const [progressPercentage, setProgressPercentage] = useState(0);
   const surveyStartedAtRef = useRef<number | null>(null);
   const hasMetTargetAccuracy = survey.valid || (survey.currentAccuracy > 0 && survey.currentAccuracy <= survey.targetAccuracy);
@@ -562,6 +564,8 @@ export const SurveyStatus: React.FC = () => {
   const hasAutoFlowControl = isAutoFlowActive || isAutoFlowSessionActive;
   const isStreamingConnected = streams.ntrip.active || (streams.ntrip.enabled && hasAutoFlowControl);
   const showBaseFixedBanner = Boolean(savedBasePosition) && !autoFlowRuntime.isAwaitingConfirm && !survey.isActive;
+  const shouldShowStreamingState = isStreamingConnected && !survey.isActive;
+  const isFixedBaseState = showBaseFixedBanner || showFixedIndicators;
   const shouldShowStopButton = !autoFlowRuntime.isAwaitingConfirm && (
     survey.isActive ||
     survey.status === 'initializing' ||
@@ -619,14 +623,20 @@ export const SurveyStatus: React.FC = () => {
     const becameRunning = prevStatus !== 'in-progress' && survey.status === 'in-progress';
     const justEnteredInitializing = prevStatus !== 'initializing' && survey.status === 'initializing';
     const justFailed = prevStatus !== 'failed' && survey.status === 'failed';
+    const resolvedToFixed = !survey.isActive && (showFixedIndicators || showBaseFixedBanner);
+    const resolvedToStreaming = !survey.isActive && isStreamingConnected;
+    const resolvedToConfirm = autoFlowRuntime.isAwaitingConfirm;
+    const leftInitializing = !survey.isActive && survey.status !== 'initializing' && prevStatus === 'initializing';
 
     if (justEnteredInitializing) {
       toast.dismiss(startToastIdRef.current);
       toast.loading('Starting survey...', { id: startToastIdRef.current });
+      isStartToastOpenRef.current = true;
     }
 
     if (becameRunning) {
       toast.dismiss(startToastIdRef.current);
+      isStartToastOpenRef.current = false;
       uiLogger.log('Survey Started Successfully', 'SurveyStatus');
       toast.success('Survey started');
       setIsLoading(false);
@@ -634,15 +644,108 @@ export const SurveyStatus: React.FC = () => {
 
     if (justFailed) {
       toast.dismiss(startToastIdRef.current);
+      isStartToastOpenRef.current = false;
       setIsLoading(false);
     }
 
-    if (!survey.isActive && survey.status !== 'initializing' && prevStatus === 'initializing') {
+    if (isStartToastOpenRef.current && resolvedToFixed) {
       toast.dismiss(startToastIdRef.current);
+      isStartToastOpenRef.current = false;
+      setIsLoading(false);
+    }
+
+    if (isStartToastOpenRef.current && resolvedToStreaming) {
+      toast.dismiss(startToastIdRef.current);
+      isStartToastOpenRef.current = false;
+      toast.success('Survey skipped. Streaming started with the fixed base.');
+      setIsLoading(false);
+    }
+
+    if (isStartToastOpenRef.current && resolvedToConfirm) {
+      toast.dismiss(startToastIdRef.current);
+      isStartToastOpenRef.current = false;
+      toast.info('Position changed. Choose Resurvey or Skip Resurvey.');
+      setIsLoading(false);
+    }
+
+    if (isStartToastOpenRef.current && leftInitializing) {
+      toast.dismiss(startToastIdRef.current);
+      isStartToastOpenRef.current = false;
+      setIsLoading(false);
     }
 
     prevStatusRef.current = survey.status;
-  }, [survey.status, survey.isActive]);
+  }, [autoFlowRuntime.isAwaitingConfirm, isStreamingConnected, showBaseFixedBanner, showFixedIndicators, survey.status, survey.isActive]);
+
+  useEffect(() => {
+    if (!isStartToastOpenRef.current) {
+      return;
+    }
+
+    const isStillStarting = pendingActionRef.current === 'start' && (survey.status === 'initializing' || survey.isActive);
+    if (isStillStarting) {
+      return;
+    }
+
+    toast.dismiss(startToastIdRef.current);
+    isStartToastOpenRef.current = false;
+  }, [isLoading, survey.status, survey.isActive, shouldShowStreamingState, isFixedBaseState, autoFlowRuntime.isAwaitingConfirm]);
+
+  useEffect(() => {
+    return () => {
+      toast.dismiss(startToastIdRef.current);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (pendingActionRef.current === 'start') {
+      const startSettled =
+        survey.status === 'in-progress' ||
+        autoFlowRuntime.isAwaitingConfirm ||
+        shouldShowStreamingState ||
+        showBaseFixedBanner ||
+        showFixedIndicators ||
+        survey.status === 'failed';
+
+      if (startSettled) {
+        pendingActionRef.current = null;
+        setIsLoading(false);
+      }
+      return;
+    }
+
+    if (pendingActionRef.current === 'stop') {
+      const stopSettled =
+        survey.status === 'stopped' &&
+        !survey.isActive &&
+        !isAutoFlowActive &&
+        !isAutoFlowSessionActive &&
+        !streams.ntrip.active;
+
+      if (stopSettled) {
+        pendingActionRef.current = null;
+        setIsLoading(false);
+      }
+      return;
+    }
+
+    if (pendingActionRef.current === 'decision') {
+      if (!autoFlowRuntime.isAwaitingConfirm) {
+        pendingActionRef.current = null;
+        setIsLoading(false);
+      }
+    }
+  }, [
+    autoFlowRuntime.isAwaitingConfirm,
+    isAutoFlowActive,
+    isAutoFlowSessionActive,
+    shouldShowStreamingState,
+    showBaseFixedBanner,
+    showFixedIndicators,
+    streams.ntrip.active,
+    survey.isActive,
+    survey.status,
+  ]);
 
   useEffect(() => {
     const percentage = requiredTimeSecs > 0
@@ -719,6 +822,7 @@ export const SurveyStatus: React.FC = () => {
 
   const handleStartSurvey = async () => {
     try {
+      pendingActionRef.current = 'start';
       setIsLoading(true);
       setAccuracyHistory([]);
       setFinalAccuracyRecord(null);
@@ -729,8 +833,10 @@ export const SurveyStatus: React.FC = () => {
 
       await startSurvey();
     } catch (error) {
+      pendingActionRef.current = null;
       const errorMsg = error instanceof Error ? error.message : String(error);
       toast.dismiss(startToastIdRef.current);
+      isStartToastOpenRef.current = false;
       uiLogger.log('Start Survey Failed', 'SurveyStatus', undefined, errorMsg);
       toast.error(`Failed to start survey: ${errorMsg}`);
       setIsLoading(false);
@@ -739,6 +845,9 @@ export const SurveyStatus: React.FC = () => {
 
   const handleStopSurvey = async () => {
     try {
+      toast.dismiss(startToastIdRef.current);
+      isStartToastOpenRef.current = false;
+      pendingActionRef.current = 'stop';
       setIsLoading(true);
       uiLogger.log('Stop Survey Button Clicked', 'SurveyStatus', {
         elapsedTime: survey.elapsedTime,
@@ -750,55 +859,66 @@ export const SurveyStatus: React.FC = () => {
       uiLogger.log('Survey Stopped Successfully', 'SurveyStatus');
       toast.success('Survey stopped');
     } catch (error) {
+      pendingActionRef.current = null;
       const errorMsg = error instanceof Error ? error.message : String(error);
       uiLogger.log('Stop Survey Failed', 'SurveyStatus', undefined, errorMsg);
       toast.error(`Failed to stop survey: ${errorMsg}`);
     } finally {
-      setIsLoading(false);
+      if (pendingActionRef.current !== 'stop') {
+        setIsLoading(false);
+      }
     }
   };
 
   const getDisplayStatus = () => {
     if (autoFlowRuntime.isAwaitingConfirm) return 'Awaiting Confirm';
     if (survey.isActive) return 'In Progress';
+    if (shouldShowStreamingState) return 'Streaming';
     if (survey.status === 'initializing') return 'Initializing';
-    if (!survey.isActive && streams.ntrip.active && (isAutoFlowSessionActive || isAutoFlowActive)) return 'Streaming';
     if (survey.status === 'stopped') return 'Stopped';
-    if (showFixedIndicators) return 'Position Fixed';
+    if (isFixedBaseState) return 'Fixed Base';
     return 'Idle';
   };
 
   const handleConfirmResurvey = async () => {
     try {
+      pendingActionRef.current = 'decision';
       setIsLoading(true);
       await confirmResurvey();
       toast.success('Resurvey confirmed');
     } catch (error) {
+      pendingActionRef.current = null;
       toast.error(`Failed to confirm resurvey: ${String(error)}`);
     } finally {
-      setIsLoading(false);
+      if (pendingActionRef.current !== 'decision') {
+        setIsLoading(false);
+      }
     }
   };
 
   const handleSkipResurvey = async () => {
     try {
+      pendingActionRef.current = 'decision';
       setIsLoading(true);
       await skipResurvey();
       toast.success('Saved position kept');
     } catch (error) {
+      pendingActionRef.current = null;
       toast.error(`Failed to skip resurvey: ${String(error)}`);
     } finally {
-      setIsLoading(false);
+      if (pendingActionRef.current !== 'decision') {
+        setIsLoading(false);
+      }
     }
   };
 
   const getStatusBadgeColor = () => {
     if (autoFlowRuntime.isAwaitingConfirm) return 'bg-violet-600 text-white';
     if (survey.isActive) return survey.status === 'initializing' ? 'bg-blue-500 text-white' : 'bg-amber-500 text-white';
+    if (shouldShowStreamingState) return 'bg-emerald-500 text-white';
     if (survey.status === 'initializing') return 'bg-blue-500 text-white';
-    if (!survey.isActive && streams.ntrip.active && (isAutoFlowSessionActive || isAutoFlowActive)) return 'bg-emerald-500 text-white';
     if (survey.status === 'stopped') return 'bg-red-500 text-white';
-    if (showFixedIndicators) return 'bg-emerald-500 text-white';
+    if (isFixedBaseState) return 'bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900';
     return 'bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300';
   };
 
@@ -838,16 +958,32 @@ export const SurveyStatus: React.FC = () => {
       
       {/* ── SURVEY STATUS CARD ── */}
       <Card className="bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 shadow-sm">
-        <CardHeader>
+        <CardHeader className="space-y-4">
           <div className="flex items-center justify-between">
             <div>
               <CardTitle className="text-slate-900 dark:text-slate-50">Survey Status</CardTitle>
-              <CardDescription className="text-slate-500 dark:text-slate-400">Real-time survey-in mode monitoring</CardDescription>
+              <CardDescription className="text-slate-500 dark:text-slate-400">
+                {isFixedBaseState ? 'Saved base reference is active and ready for streaming.' : 'Real-time survey-in mode monitoring'}
+              </CardDescription>
             </div>
             <Badge className={`${getStatusBadgeColor()} border-none shadow-none`}>
               {getDisplayStatus()}
             </Badge>
           </div>
+
+          {showBaseFixedBanner && (
+            <div className="flex items-center justify-start">
+              <div className="grid min-w-[240px] gap-1 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm dark:border-slate-800 dark:bg-slate-950/60">
+                <div className="flex items-center gap-2 text-slate-900 dark:text-slate-100">
+                  <CheckCircle2 className="size-4 text-emerald-600 dark:text-emerald-400" />
+                  <span className="font-medium">Base is Fixed</span>
+                </div>
+                <div className="text-xs text-slate-500 dark:text-slate-400">
+                  Stored base position is active. Start the flow to continue with corrections.
+                </div>
+              </div>
+            </div>
+          )}
         </CardHeader>
         <CardContent className="space-y-6">
           <div className="flex items-center justify-center">
@@ -882,16 +1018,6 @@ export const SurveyStatus: React.FC = () => {
               </div>
             </div>
           </div>
-
-          {/* Base is Fixed Status Display */}
-          {showBaseFixedBanner && (
-            <div className="flex items-center justify-center mt-4 mb-2">
-              <div className="flex items-center gap-2 px-4 py-2 bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-800 rounded-full">
-                <CheckCircle2 className="size-4 text-emerald-600 dark:text-emerald-400" />
-                <span className="text-sm font-semibold text-emerald-700 dark:text-emerald-300">Base is Fixed</span>
-              </div>
-            </div>
-          )}
 
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <div className="text-center p-4 rounded-xl bg-slate-50 dark:bg-slate-950/50 border border-slate-200 dark:border-slate-800/80">
