@@ -19,4 +19,10 @@ export default defineConfig({
 
   // File types to support raw imports. Never add .css, .tsx, or .ts files to this.
   assetsInclude: ['**/*.svg', '**/*.csv'],
+
+  // On Windows, dist/assets can be held open by other processes (Explorer preview,
+  // antivirus, etc.). The default clean step can fail with ENOTEMPTY.
+  build: {
+    emptyOutDir: false,
+  },
 })

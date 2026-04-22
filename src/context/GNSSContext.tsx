@@ -1479,8 +1479,10 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
       latitude: config.latitude,
       longitude: config.longitude,
       height: config.height,
-      accuracy_m: config.accuracyMeters,
+      fixed_pos_acc: config.accuracyMeters,
       msm_type: config.msmType ?? "MSM4",
+      enable_rtcm: true,
+      save_to_flash: false,
     });
 
     setFixedBaseReference({

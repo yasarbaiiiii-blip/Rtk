@@ -481,4 +481,3 @@ Most important next action:
 1. Confirm whether the backend should keep supporting legacy `/api/v1/rtcm` and `/api/v1/ntrip`
 2. If not, migrate frontend to `/api/v1/status/rtcm` and `/api/v1/status/ntrip`
 3. Decide whether survey should remain AutoFlow-driven or move to direct `/api/v1/survey/start` and `/api/v1/survey/stop`
-

@@ -36,6 +36,24 @@ import { toast } from 'sonner';
 import { uiLogger } from '../../utils/uiLogger';
 import { api } from '../../api/gnssApiDynamic';
 
+type PositionExportFile = {
+  format: 'gnss-position-export';
+  version: 1;
+  name: string;
+  exported_at: string;
+  accuracy_m: number;
+  global_llh: {
+    latitude: number;
+    longitude: number;
+    altitude: number;
+  };
+  local_xyz: {
+    x: number;
+    y: number;
+    z: number;
+  };
+};
+
 /* ── Custom Responsive Section Wrapper (Native Mobile Feel with Perfect Dark Mode) ── */
 const SectionCard: React.FC<{
   title: string;
@@ -191,6 +209,10 @@ export const ConfigurationScreen: React.FC = () => {
   const [isMobile, setIsMobile] = useState(false);
   const [autoFlowPromptDismissed, setAutoFlowPromptDismissed] = useState(false);
   const [autoFlowActionPending, setAutoFlowActionPending] = useState(false);
+  const [importedFixedPosition, setImportedFixedPosition] = useState<PositionExportFile | null>(null);
+  const [isApplyImportedPositionPending, setIsApplyImportedPositionPending] = useState(false);
+  const fixedPositionFileInputRef = useRef<HTMLInputElement | null>(null);
+  const [fixedPositionView, setFixedPositionView] = useState<'global' | 'local'>('global');
 
   const ecefToLlh = (x: number, y: number, z: number) => {
     const a = 6378137.0;
@@ -377,26 +399,10 @@ export const ConfigurationScreen: React.FC = () => {
   const handleSave = async (): Promise<boolean> => {
     uiLogger.log('Save Configuration clicked', 'ConfigurationScreen', config);
     const payload = getAutoFlowPayload();
-    const shouldApplyFixedBase = config.baseStation.fixedMode.enabled;
 
     setIsSaving(true);
     try {
       const saveResponse = await api.saveAutoFlowConfig(payload);
-
-      if (shouldApplyFixedBase) {
-        const llh = ecefToLlh(
-          config.baseStation.fixedMode.coordinates.latitude,
-          config.baseStation.fixedMode.coordinates.longitude,
-          config.baseStation.fixedMode.coordinates.altitude
-        );
-        await applyFixedBasePosition({
-          latitude: llh.latitude,
-          longitude: llh.longitude,
-          height: llh.altitude,
-          accuracyMeters: config.baseStation.fixedMode.coordinates.accuracy,
-          msmType: activeMsgType,
-        });
-      }
 
       const backendSnapshot =
         saveResponse && typeof saveResponse === 'object' && ('config' in saveResponse || 'enabled' in saveResponse)
@@ -558,95 +564,111 @@ export const ConfigurationScreen: React.FC = () => {
     }));
   };
 
-  const loadCurrentSurvey = () => {
-    const liveLatitude = gnssStatus.globalPosition.latitude || survey.position.latitude;
-    const liveLongitude = gnssStatus.globalPosition.longitude || survey.position.longitude;
-    const liveAltitude = gnssStatus.globalPosition.altitude || survey.position.altitude;
-    const ecef = llhToEcef(liveLatitude, liveLongitude, liveAltitude);
-
-    updateDraftConfig((prev) => ({
-      ...prev,
-      baseStation: {
-        ...prev.baseStation,
-        fixedMode: {
-          enabled: true,
-          coordinates: {
-            latitude: Number(ecef.x.toFixed(4)),
-            longitude: Number(ecef.y.toFixed(4)),
-            altitude: Number(ecef.z.toFixed(4)),
-            accuracy: Number((gnssStatus.globalPosition.horizontalAccuracy || survey.position.accuracy || prev.baseStation.fixedMode.coordinates.accuracy || 0).toFixed(4)),
-          },
-        },
-      },
-    }));
+  const handleLoadFixedPositionClick = () => {
+    fixedPositionFileInputRef.current?.click();
   };
 
-  const loadSavedPositionIntoForm = () => {
-    if (!savedBasePosition) {
-      toast.error('No saved position available');
+  const handleImportFixedPosition = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+
+    if (!file) {
       return;
     }
 
-    updateDraftConfig((prev) => ({
-      ...prev,
-      baseStation: {
-        ...prev.baseStation,
-        fixedMode: {
-          enabled: true,
-          coordinates: {
-            latitude: Number(savedBasePosition.ecef_x.toFixed(4)),
-            longitude: Number(savedBasePosition.ecef_y.toFixed(4)),
-            altitude: Number(savedBasePosition.ecef_z.toFixed(4)),
-            accuracy: Number((savedBasePosition.accuracy || 0).toFixed(4)),
+    try {
+      const raw = await file.text();
+      const parsed = JSON.parse(raw) as Partial<PositionExportFile>;
+      const lat = Number(parsed?.global_llh?.latitude);
+      const lon = Number(parsed?.global_llh?.longitude);
+      const alt = Number(parsed?.global_llh?.altitude);
+      const accuracy = Number(parsed?.accuracy_m);
+
+      if (
+        parsed?.format !== 'gnss-position-export' ||
+        parsed?.version !== 1 ||
+        ![lat, lon, alt, accuracy].every((value) => Number.isFinite(value))
+      ) {
+        throw new Error('Invalid fixed position file');
+      }
+
+      const importedFile: PositionExportFile = {
+        format: 'gnss-position-export',
+        version: 1,
+        name: typeof parsed.name === 'string' && parsed.name.trim().length > 0 ? parsed.name.trim() : file.name.replace(/\.json$/i, ''),
+        exported_at: typeof parsed.exported_at === 'string' ? parsed.exported_at : new Date().toISOString(),
+        accuracy_m: accuracy,
+        global_llh: { latitude: lat, longitude: lon, altitude: alt },
+        local_xyz: {
+          x: Number(parsed?.local_xyz?.x) || 0,
+          y: Number(parsed?.local_xyz?.y) || 0,
+          z: Number(parsed?.local_xyz?.z) || 0,
+        },
+      };
+
+      updateDraftConfig((prev) => ({
+        ...prev,
+        baseStation: {
+          ...prev.baseStation,
+          fixedMode: {
+            enabled: true,
+            coordinates: {
+              latitude: Number(importedFile.global_llh.latitude.toFixed(8)),
+              longitude: Number(importedFile.global_llh.longitude.toFixed(8)),
+              altitude: Number(importedFile.global_llh.altitude.toFixed(3)),
+              accuracy: Number(importedFile.accuracy_m.toFixed(4)),
+            },
           },
         },
-      },
-    }));
-    setFixedBaseDisplayActive(true);
-    toast.success('Saved position loaded');
+      }));
+      setImportedFixedPosition(importedFile);
+      toast.success('Fixed position file loaded');
+    } catch (error) {
+      console.error(error);
+      setImportedFixedPosition(null);
+      toast.error('Failed to load fixed position file');
+    }
   };
 
-  const handleExportSavedPosition = () => {
-    if (!savedBasePosition) {
-      toast.error('No saved position available to export');
+  const handleApplyImportedFixedPosition = async () => {
+    if (!importedFixedPosition) {
+      toast.error('Load a fixed position file first');
       return;
     }
 
-    const llh = ecefToLlh(
-      savedBasePosition.ecef_x,
-      savedBasePosition.ecef_y,
-      savedBasePosition.ecef_z
-    );
+    const { latitude, longitude, altitude, accuracy } = config.baseStation.fixedMode.coordinates;
+    setIsApplyImportedPositionPending(true);
+    try {
+      await applyFixedBasePosition({
+        latitude,
+        longitude,
+        height: altitude,
+        accuracyMeters: accuracy,
+        msmType: activeMsgType,
+      });
 
-    const payload = {
-      exported_at: new Date().toISOString(),
-      surveyed_at: savedBasePosition.surveyed_at ?? null,
-      accuracy_m: savedBasePosition.accuracy,
-      ecef: {
-        x: savedBasePosition.ecef_x,
-        y: savedBasePosition.ecef_y,
-        z: savedBasePosition.ecef_z,
-      },
-      llh,
-    };
-
-    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-
-    link.href = url;
-    link.download = `saved-base-position-${stamp}.json`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
-    toast.success('Saved position exported');
+      setFixedBaseDisplayActive(true);
+      toast.success('Fixed position applied to base');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      toast.error(`Failed to apply fixed position: ${message}`);
+    } finally {
+      setIsApplyImportedPositionPending(false);
+    }
   };
 
   const handleDeleteFixedPosition = async () => {
-    await deleteSavedPosition();
+    try {
+      if (savedBasePosition) {
+        await deleteSavedPosition();
+      }
+    } catch (error) {
+      toast.error(`Failed to delete saved position: ${String(error)}`);
+      return;
+    }
+
     setFixedBaseDisplayActive(false);
+    setImportedFixedPosition(null);
     const clearedConfig = {
       ...config,
       baseStation: {
@@ -665,7 +687,7 @@ export const ConfigurationScreen: React.FC = () => {
     setConfig(clearedConfig);
     updateConfiguration(clearedConfig);
     setIsDirty(false);
-    toast.success('Saved position deleted');
+    toast.success(savedBasePosition ? 'Saved position deleted' : 'Fixed position cleared');
   };
 
   // Shared classes for typography scaling (Matches Desktop & Mobile flawlessly)
@@ -999,6 +1021,7 @@ export const ConfigurationScreen: React.FC = () => {
                     onCheckedChange={(checked) => {
                       if (!checked) {
                         setFixedBaseDisplayActive(false);
+                        setImportedFixedPosition(null);
                       }
 
                       updateDraftConfig((prev) => ({
@@ -1014,52 +1037,98 @@ export const ConfigurationScreen: React.FC = () => {
                 
                 {config.baseStation.fixedMode.enabled && (
                   <div className="p-4 space-y-4 animate-in fade-in slide-in-from-top-2 duration-300">
-                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                      <div>
-                        <Label htmlFor="fixed-lat" className={labelClasses}>ECEF X</Label>
-                        <Input
-                          id="fixed-lat" type="number" step="0.0001"
-                          value={config.baseStation.fixedMode.coordinates.latitude}
-                          onChange={(e) => updateFixedCoordinates({ latitude: parseFloat(e.target.value) || 0 })}
-                          className={`${inputClasses} font-mono`}
-                        />
+                    <input
+                      ref={fixedPositionFileInputRef}
+                      type="file"
+                      accept="application/json,.json"
+                      className="hidden"
+                      onChange={handleImportFixedPosition}
+                    />
+                    <Tabs value={fixedPositionView} onValueChange={(v) => setFixedPositionView(v as any)}>
+                      <TabsList className="grid w-full grid-cols-2 bg-slate-100 dark:bg-slate-950/50 p-1 rounded-lg border border-slate-200 dark:border-slate-800/60 h-10">
+                        <TabsTrigger value="global" className="flex items-center justify-center text-[11px] sm:text-xs font-semibold data-[state=active]:bg-white dark:data-[state=active]:bg-slate-800 rounded-md data-[state=active]:shadow-sm data-[state=active]:text-slate-900 dark:data-[state=active]:text-white transition-all h-full">
+                          GLOBAL
+                        </TabsTrigger>
+                        <TabsTrigger value="local" className="flex items-center justify-center text-[11px] sm:text-xs font-semibold data-[state=active]:bg-white dark:data-[state=active]:bg-slate-800 rounded-md data-[state=active]:shadow-sm data-[state=active]:text-slate-900 dark:data-[state=active]:text-white transition-all h-full">
+                          LOCAL
+                        </TabsTrigger>
+                      </TabsList>
+                    </Tabs>
+
+                    {fixedPositionView === 'global' ? (
+                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                        <div>
+                          <Label htmlFor="fixed-lat" className={labelClasses}>Latitude</Label>
+                          <Input
+                            id="fixed-lat" type="number" step="0.00000001"
+                            value={config.baseStation.fixedMode.coordinates.latitude}
+                            onChange={(e) => updateFixedCoordinates({ latitude: parseFloat(e.target.value) || 0 })}
+                            className={`${inputClasses} font-mono`}
+                          />
+                        </div>
+                        <div>
+                          <Label htmlFor="fixed-lon" className={labelClasses}>Longitude</Label>
+                          <Input
+                            id="fixed-lon" type="number" step="0.00000001"
+                            value={config.baseStation.fixedMode.coordinates.longitude}
+                            onChange={(e) => updateFixedCoordinates({ longitude: parseFloat(e.target.value) || 0 })}
+                            className={`${inputClasses} font-mono`}
+                          />
+                        </div>
+                        <div>
+                          <Label htmlFor="fixed-alt" className={labelClasses}>Altitude (m)</Label>
+                          <Input
+                            id="fixed-alt" type="number" step="0.001"
+                            value={config.baseStation.fixedMode.coordinates.altitude}
+                            onChange={(e) => updateFixedCoordinates({ altitude: parseFloat(e.target.value) || 0 })}
+                            className={`${inputClasses} font-mono`}
+                          />
+                        </div>
+                        <div>
+                          <Label htmlFor="fixed-acc" className={labelClasses}>Accuracy (m)</Label>
+                          <Input
+                            id="fixed-acc" type="number" step="0.001"
+                            value={config.baseStation.fixedMode.coordinates.accuracy}
+                            onChange={(e) => updateFixedCoordinates({ accuracy: parseFloat(e.target.value) || 0 })}
+                            className={`${inputClasses} font-mono`}
+                          />
+                        </div>
                       </div>
-                      <div>
-                        <Label htmlFor="fixed-lon" className={labelClasses}>ECEF Y</Label>
-                        <Input
-                          id="fixed-lon" type="number" step="0.0001"
-                          value={config.baseStation.fixedMode.coordinates.longitude}
-                          onChange={(e) => updateFixedCoordinates({ longitude: parseFloat(e.target.value) || 0 })}
-                          className={`${inputClasses} font-mono`}
-                        />
+                    ) : (
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                        <div>
+                          <Label className={labelClasses}>X</Label>
+                          <Input
+                            readOnly
+                            value={importedFixedPosition ? importedFixedPosition.local_xyz.x.toFixed(4) : 'NIL'}
+                            className={`${inputClasses} font-mono opacity-80`}
+                          />
+                        </div>
+                        <div>
+                          <Label className={labelClasses}>Y</Label>
+                          <Input
+                            readOnly
+                            value={importedFixedPosition ? importedFixedPosition.local_xyz.y.toFixed(4) : 'NIL'}
+                            className={`${inputClasses} font-mono opacity-80`}
+                          />
+                        </div>
+                        <div>
+                          <Label className={labelClasses}>Z</Label>
+                          <Input
+                            readOnly
+                            value={importedFixedPosition ? importedFixedPosition.local_xyz.z.toFixed(4) : 'NIL'}
+                            className={`${inputClasses} font-mono opacity-80`}
+                          />
+                        </div>
                       </div>
-                      <div>
-                        <Label htmlFor="fixed-alt" className={labelClasses}>ECEF Z</Label>
-                        <Input
-                          id="fixed-alt" type="number" step="0.001"
-                          value={config.baseStation.fixedMode.coordinates.altitude}
-                          onChange={(e) => updateFixedCoordinates({ altitude: parseFloat(e.target.value) || 0 })}
-                          className={`${inputClasses} font-mono`}
-                        />
-                      </div>
-                      <div>
-                        <Label htmlFor="fixed-acc" className={labelClasses}>Accuracy (m)</Label>
-                        <Input
-                          id="fixed-acc" type="number" step="0.001"
-                          value={config.baseStation.fixedMode.coordinates.accuracy}
-                          onChange={(e) => updateFixedCoordinates({ accuracy: parseFloat(e.target.value) || 0 })}
-                          className={`${inputClasses} font-mono`}
-                        />
-                      </div>
-                    </div>
+                    )}
                     <div className="rounded-2xl border border-slate-200 dark:border-slate-800/80 bg-white/80 dark:bg-slate-900/50 p-2 shadow-sm">
-                      <div className="grid grid-cols-3 gap-2">
+                      <div className="grid grid-cols-2 gap-2">
                         <Button
                           type="button"
                           variant="ghost"
                           className="h-16 rounded-xl border border-slate-200/80 bg-slate-50 text-slate-700 hover:bg-slate-100 hover:text-slate-900 dark:border-slate-800 dark:bg-slate-950/70 dark:text-slate-300 dark:hover:bg-slate-900 flex-col gap-1.5"
-                          onClick={loadSavedPositionIntoForm}
-                          disabled={!savedBasePosition}
+                          onClick={handleLoadFixedPositionClick}
                         >
                           <MapPin className="size-4 text-blue-500" />
                           <span className="text-[11px] font-semibold tracking-wide">Load</span>
@@ -1067,29 +1136,24 @@ export const ConfigurationScreen: React.FC = () => {
                         <Button
                           type="button"
                           variant="ghost"
-                          className="h-16 rounded-xl border border-slate-200/80 bg-slate-50 text-slate-700 hover:bg-slate-100 hover:text-slate-900 dark:border-slate-800 dark:bg-slate-950/70 dark:text-slate-300 dark:hover:bg-slate-900 flex-col gap-1.5"
-                          onClick={handleExportSavedPosition}
-                          disabled={!savedBasePosition}
-                        >
-                          <Download className="size-4 text-slate-500" />
-                          <span className="text-[11px] font-semibold tracking-wide">Export</span>
-                        </Button>
-                        <Button
-                          type="button"
-                          variant="ghost"
                           className="h-16 rounded-xl border border-red-200/80 bg-red-50/70 text-red-600 hover:bg-red-50 dark:border-red-950/60 dark:bg-red-950/20 dark:text-red-400 dark:hover:bg-red-950/30 flex-col gap-1.5"
                           onClick={handleDeleteFixedPosition}
-                          disabled={!savedBasePosition}
+                          disabled={!savedBasePosition && !importedFixedPosition && !config.baseStation.fixedMode.enabled}
                         >
                           <Trash2 className="size-4" />
                           <span className="text-[11px] font-semibold tracking-wide">Delete</span>
                         </Button>
                       </div>
                     </div>
-                    {!savedBasePosition && (
-                      <Button variant="outline" className="w-full gap-2 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-900 transition-colors active:scale-95 font-semibold h-10 rounded-lg text-xs tracking-wide bg-white dark:bg-slate-900" onClick={loadCurrentSurvey}>
-                        <MapPin className="size-4 text-blue-500" />
-                        LOAD CURRENT POSITION
+                    {importedFixedPosition && (
+                      <Button
+                        type="button"
+                        className="w-full gap-2 bg-blue-600 hover:bg-blue-700 text-white transition-colors active:scale-95 font-semibold h-11 rounded-lg text-xs tracking-wide shadow-sm disabled:opacity-70 disabled:cursor-not-allowed"
+                        onClick={handleApplyImportedFixedPosition}
+                        disabled={isApplyImportedPositionPending}
+                      >
+                        <Upload className="size-4" />
+                        {isApplyImportedPositionPending ? 'APPLYING TO BASE...' : 'APPLY TO BASE'}
                       </Button>
                     )}
                   </div>

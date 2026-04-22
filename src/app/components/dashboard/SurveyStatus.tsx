@@ -501,6 +501,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useGNSS } from '../../../context/GNSSContext';
 import { api } from '../../../api/gnssApiDynamic';
+import { Capacitor } from '@capacitor/core';
+import { Directory, Encoding, Filesystem } from '@capacitor/filesystem';
+import { Share } from '@capacitor/share';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../ui/card';
 import { Button } from '../ui/button';
 import { Badge } from '../ui/badge';
@@ -511,13 +514,13 @@ import {
   Play,
   Square,
   MapPin,
-  Copy,
   CheckCircle2,
   Clock,
   Target,
   Satellite,
   Radio, 
   Activity, 
+  Download,
   RefreshCw // Added for the minimal spinner
 } from 'lucide-react';
 import { toast } from 'sonner';
@@ -787,11 +790,104 @@ export const SurveyStatus: React.FC = () => {
 
   const coords = formatCoordinate();
 
-  const copyCoordinates = () => {
-    const coordText = `${coordinateFormat}: Lat/X: ${coords.lat}, Lon/Y: ${coords.lon}, Alt/Z: ${coords.alt}m`;
-    navigator.clipboard.writeText(coordText);
-    uiLogger.log('Copy Coordinates', 'SurveyStatus', coordText);
-    toast.success('Coordinates copied to clipboard');
+  const llhToEcef = (latitude: number, longitude: number, altitude: number) => {
+    const a = 6378137.0;
+    const e2 = 6.69437999014e-3;
+    const lat = latitude * (Math.PI / 180);
+    const lon = longitude * (Math.PI / 180);
+    const sinLat = Math.sin(lat);
+    const cosLat = Math.cos(lat);
+    const cosLon = Math.cos(lon);
+    const sinLon = Math.sin(lon);
+    const n = a / Math.sqrt(1 - e2 * sinLat * sinLat);
+
+    return {
+      x: (n + altitude) * cosLat * cosLon,
+      y: (n + altitude) * cosLat * sinLon,
+      z: (n * (1 - e2) + altitude) * sinLat,
+    };
+  };
+
+  const normalizeFileName = (input: string, ext: string) => {
+    const cleaned = input.trim().replace(/[<>:"/\\|?*]+/g, '_');
+    const safe = cleaned || `position_${new Date().toISOString().split('T')[0]}`;
+    return safe.toLowerCase().endsWith(`.${ext}`) ? safe : `${safe}.${ext}`;
+  };
+
+  const downloadOrShareFile = async (
+    fileName: string,
+    content: string,
+    mimeType: string,
+    successMessage: string
+  ) => {
+    if (Capacitor.isNativePlatform()) {
+      await Filesystem.writeFile({
+        path: fileName,
+        data: content,
+        directory: Directory.Documents,
+        encoding: Encoding.UTF8,
+        recursive: true,
+      });
+
+      const { uri } = await Filesystem.getUri({
+        directory: Directory.Documents,
+        path: fileName,
+      });
+
+      await Share.share({
+        title: fileName,
+        text: `Exported file: ${fileName}`,
+        url: uri,
+        dialogTitle: 'Save or share exported file',
+      });
+
+      toast.success(successMessage);
+      return;
+    }
+
+    const blob = new Blob([content], { type: mimeType });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = fileName;
+    a.click();
+    URL.revokeObjectURL(url);
+    toast.success(successMessage);
+  };
+
+  const exportPositionFile = async () => {
+    const defaultName = `position_${new Date().toISOString().split('T')[0]}`;
+    const inputName = window.prompt('Enter file name', defaultName);
+    if (!inputName) return;
+
+    const lat = Number(gnssStatus.globalPosition.latitude);
+    const lon = Number(gnssStatus.globalPosition.longitude);
+    const alt = Number(gnssStatus.globalPosition.altitude);
+    const accuracy = Number(survey.position.accuracy);
+
+    if (![lat, lon, alt].every((v) => Number.isFinite(v)) || lat === 0 || lon === 0) {
+      toast.error('No valid global position to export');
+      return;
+    }
+
+    const ecef = llhToEcef(lat, lon, alt);
+    const payload = {
+      format: 'gnss-position-export',
+      version: 1,
+      name: normalizeFileName(inputName, 'json'),
+      exported_at: new Date().toISOString(),
+      accuracy_m: Number.isFinite(accuracy) ? accuracy : 0,
+      global_llh: { latitude: lat, longitude: lon, altitude: alt },
+      local_xyz: { x: ecef.x, y: ecef.y, z: ecef.z },
+    };
+
+    try {
+      const fileName = payload.name;
+      await downloadOrShareFile(fileName, JSON.stringify(payload, null, 2), 'application/json', 'Position exported');
+      uiLogger.log('Export Position', 'SurveyStatus', payload);
+    } catch (error) {
+      toast.error(`Position export failed: ${String(error)}`);
+    }
   };
 
   const handleStartSurvey = async () => {
@@ -1245,13 +1341,13 @@ export const SurveyStatus: React.FC = () => {
             </div>
           </div>
 
-          <Button 
-            variant="default" 
-            className="w-full gap-2 bg-slate-900 hover:bg-slate-800 dark:bg-slate-100 dark:hover:bg-white dark:text-slate-900 rounded-xl h-10 font-bold text-xs transition-transform active:scale-95" 
-            onClick={copyCoordinates}
+          <Button
+            variant="default"
+            className="w-full gap-2 bg-slate-900 hover:bg-slate-800 dark:bg-slate-100 dark:hover:bg-white dark:text-slate-900 rounded-xl h-10 font-bold text-xs transition-transform active:scale-95"
+            onClick={exportPositionFile}
           >
-            <Copy className="size-4" />
-            COPY TO CLIPBOARD
+            <Download className="size-4" />
+            EXPORT FILE
           </Button>
         </CardContent>
       </Card>
