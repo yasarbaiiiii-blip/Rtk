@@ -581,6 +581,69 @@ export const ConfigurationScreen: React.FC = () => {
     }));
   };
 
+  const loadSavedPositionIntoForm = () => {
+    if (!savedBasePosition) {
+      toast.error('No saved position available');
+      return;
+    }
+
+    updateDraftConfig((prev) => ({
+      ...prev,
+      baseStation: {
+        ...prev.baseStation,
+        fixedMode: {
+          enabled: true,
+          coordinates: {
+            latitude: Number(savedBasePosition.ecef_x.toFixed(4)),
+            longitude: Number(savedBasePosition.ecef_y.toFixed(4)),
+            altitude: Number(savedBasePosition.ecef_z.toFixed(4)),
+            accuracy: Number((savedBasePosition.accuracy || 0).toFixed(4)),
+          },
+        },
+      },
+    }));
+    setFixedBaseDisplayActive(true);
+    toast.success('Saved position loaded');
+  };
+
+  const handleExportSavedPosition = () => {
+    if (!savedBasePosition) {
+      toast.error('No saved position available to export');
+      return;
+    }
+
+    const llh = ecefToLlh(
+      savedBasePosition.ecef_x,
+      savedBasePosition.ecef_y,
+      savedBasePosition.ecef_z
+    );
+
+    const payload = {
+      exported_at: new Date().toISOString(),
+      surveyed_at: savedBasePosition.surveyed_at ?? null,
+      accuracy_m: savedBasePosition.accuracy,
+      ecef: {
+        x: savedBasePosition.ecef_x,
+        y: savedBasePosition.ecef_y,
+        z: savedBasePosition.ecef_z,
+      },
+      llh,
+    };
+
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+
+    link.href = url;
+    link.download = `saved-base-position-${stamp}.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+    toast.success('Saved position exported');
+  };
+
   const handleDeleteFixedPosition = async () => {
     await deleteSavedPosition();
     setFixedBaseDisplayActive(false);
@@ -989,18 +1052,46 @@ export const ConfigurationScreen: React.FC = () => {
                         />
                       </div>
                     </div>
-                    <Button variant="outline" className="w-full gap-2 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-900 transition-colors active:scale-95 font-semibold h-10 rounded-lg text-xs tracking-wide bg-white dark:bg-slate-900" onClick={loadCurrentSurvey}>
-                      <MapPin className="size-4 text-blue-500" />
-                      LOAD CURRENT POSITION
-                    </Button>
-                    <Button
-                      variant="outline"
-                      className="w-full gap-2 border-red-200 dark:border-red-900/50 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/30 transition-colors active:scale-95 font-semibold h-10 rounded-lg text-xs tracking-wide bg-white dark:bg-slate-900"
-                      onClick={handleDeleteFixedPosition}
-                    >
-                      <Trash2 className="size-4" />
-                      DELETE SAVED POSITION
-                    </Button>
+                    <div className="rounded-2xl border border-slate-200 dark:border-slate-800/80 bg-white/80 dark:bg-slate-900/50 p-2 shadow-sm">
+                      <div className="grid grid-cols-3 gap-2">
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          className="h-16 rounded-xl border border-slate-200/80 bg-slate-50 text-slate-700 hover:bg-slate-100 hover:text-slate-900 dark:border-slate-800 dark:bg-slate-950/70 dark:text-slate-300 dark:hover:bg-slate-900 flex-col gap-1.5"
+                          onClick={loadSavedPositionIntoForm}
+                          disabled={!savedBasePosition}
+                        >
+                          <MapPin className="size-4 text-blue-500" />
+                          <span className="text-[11px] font-semibold tracking-wide">Load</span>
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          className="h-16 rounded-xl border border-slate-200/80 bg-slate-50 text-slate-700 hover:bg-slate-100 hover:text-slate-900 dark:border-slate-800 dark:bg-slate-950/70 dark:text-slate-300 dark:hover:bg-slate-900 flex-col gap-1.5"
+                          onClick={handleExportSavedPosition}
+                          disabled={!savedBasePosition}
+                        >
+                          <Download className="size-4 text-slate-500" />
+                          <span className="text-[11px] font-semibold tracking-wide">Export</span>
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          className="h-16 rounded-xl border border-red-200/80 bg-red-50/70 text-red-600 hover:bg-red-50 dark:border-red-950/60 dark:bg-red-950/20 dark:text-red-400 dark:hover:bg-red-950/30 flex-col gap-1.5"
+                          onClick={handleDeleteFixedPosition}
+                          disabled={!savedBasePosition}
+                        >
+                          <Trash2 className="size-4" />
+                          <span className="text-[11px] font-semibold tracking-wide">Delete</span>
+                        </Button>
+                      </div>
+                    </div>
+                    {!savedBasePosition && (
+                      <Button variant="outline" className="w-full gap-2 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-900 transition-colors active:scale-95 font-semibold h-10 rounded-lg text-xs tracking-wide bg-white dark:bg-slate-900" onClick={loadCurrentSurvey}>
+                        <MapPin className="size-4 text-blue-500" />
+                        LOAD CURRENT POSITION
+                      </Button>
+                    )}
                   </div>
                 )}
               </div>
