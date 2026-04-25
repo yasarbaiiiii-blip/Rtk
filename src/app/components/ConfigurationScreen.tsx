@@ -4,6 +4,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { Label } from './ui/label';
+import { Checkbox } from './ui/checkbox';
 import { Switch } from './ui/switch';
 import { Slider } from './ui/slider';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
@@ -171,6 +172,8 @@ export const ConfigurationScreen: React.FC = () => {
     gnssStatus,
     startNTRIP,
     stopNTRIP,
+    startLora,
+    stopLora,
     isAutoFlowActive,
     savedBasePosition,
     applyFixedBasePosition,
@@ -182,6 +185,7 @@ export const ConfigurationScreen: React.FC = () => {
   const [isDirty, setIsDirty] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [isNtripActionPending, setIsNtripActionPending] = useState(false);
+  const [isLoraActionPending, setIsLoraActionPending] = useState(false);
   const [activeMsgType, setActiveMsgType] = useState<'MSM4' | 'MSM7'>('MSM4');
   const [rtcmActiveMessages, setRtcmActiveMessages] = useState<string[]>([]);
   const [rtcmLoading, setRtcmLoading] = useState(true);
@@ -213,6 +217,7 @@ export const ConfigurationScreen: React.FC = () => {
   const [isApplyImportedPositionPending, setIsApplyImportedPositionPending] = useState(false);
   const fixedPositionFileInputRef = useRef<HTMLInputElement | null>(null);
   const [fixedPositionView, setFixedPositionView] = useState<'global' | 'local'>('global');
+  const [isFixedPositionEditEnabled, setIsFixedPositionEditEnabled] = useState(false);
 
   const ecefToLlh = (x: number, y: number, z: number) => {
     const a = 6378137.0;
@@ -538,10 +543,10 @@ export const ConfigurationScreen: React.FC = () => {
         fixedMode: {
           enabled: true,
           coordinates: {
-            latitude: savedBasePosition.ecef_x,
-            longitude: savedBasePosition.ecef_y,
-            altitude: savedBasePosition.ecef_z,
-            accuracy: savedBasePosition.accuracy,
+            latitude: Number(savedBasePosition.latitude ?? 0),
+            longitude: Number(savedBasePosition.longitude ?? 0),
+            altitude: Number(savedBasePosition.altitude ?? 0),
+            accuracy: Number(savedBasePosition.accuracy ?? 0),
           },
         },
       },
@@ -562,6 +567,25 @@ export const ConfigurationScreen: React.FC = () => {
         },
       },
     }));
+  };
+
+  const handleStartStopLora = async () => {
+    if (isLoraActionPending) return;
+
+    setIsLoraActionPending(true);
+    try {
+      if (streams.lora.enabled) {
+        await stopLora();
+        toast.success('LoRa stopped');
+      } else {
+        await startLora();
+        toast.success('LoRa started');
+      }
+    } catch (error) {
+      toast.error(`LoRa action failed: ${String(error)}`);
+    } finally {
+      setIsLoraActionPending(false);
+    }
   };
 
   const handleLoadFixedPositionClick = () => {
@@ -622,6 +646,7 @@ export const ConfigurationScreen: React.FC = () => {
         },
       }));
       setImportedFixedPosition(importedFile);
+      setFixedPositionView('global');
       toast.success('Fixed position file loaded');
     } catch (error) {
       console.error(error);
@@ -631,12 +656,18 @@ export const ConfigurationScreen: React.FC = () => {
   };
 
   const handleApplyImportedFixedPosition = async () => {
-    if (!importedFixedPosition) {
-      toast.error('Load a fixed position file first');
+    const { latitude, longitude, altitude, accuracy } = config.baseStation.fixedMode.coordinates;
+
+    const isValidLat = Number.isFinite(latitude) && latitude >= -90 && latitude <= 90;
+    const isValidLon = Number.isFinite(longitude) && longitude >= -180 && longitude <= 180;
+    const isValidAlt = Number.isFinite(altitude);
+    const isValidAcc = Number.isFinite(accuracy) && accuracy > 0;
+
+    if (!isValidLat || !isValidLon || !isValidAlt || !isValidAcc) {
+      toast.error('Enter valid Latitude/Longitude/Altitude/Accuracy before applying');
       return;
     }
 
-    const { latitude, longitude, altitude, accuracy } = config.baseStation.fixedMode.coordinates;
     setIsApplyImportedPositionPending(true);
     try {
       await applyFixedBasePosition({
@@ -1016,27 +1047,19 @@ export const ConfigurationScreen: React.FC = () => {
                     <h3 className="font-semibold text-sm text-slate-900 dark:text-slate-100">Fixed Position Override</h3>
                     <p className="text-[11px] font-medium text-slate-500 dark:text-slate-400 mt-0.5">Use precise known coordinates.</p>
                   </div>
-                  <Switch
-                    checked={config.baseStation.fixedMode.enabled}
-                    onCheckedChange={(checked) => {
-                      if (!checked) {
-                        setFixedBaseDisplayActive(false);
-                        setImportedFixedPosition(null);
-                      }
-
-                      updateDraftConfig((prev) => ({
-                        ...prev,
-                        baseStation: {
-                          ...prev.baseStation,
-                          fixedMode: { ...prev.baseStation.fixedMode, enabled: checked },
-                        },
-                      }));
-                    }}
-                  />
+                  <div className="flex items-center gap-2">
+                    <Checkbox
+                      checked={isFixedPositionEditEnabled}
+                      onCheckedChange={(checked) => setIsFixedPositionEditEnabled(Boolean(checked))}
+                      id="fixed-edit"
+                    />
+                    <Label htmlFor="fixed-edit" className="text-[11px] font-semibold text-slate-600 dark:text-slate-300 uppercase tracking-wider cursor-pointer select-none">
+                      Edit
+                    </Label>
+                  </div>
                 </div>
                 
-                {config.baseStation.fixedMode.enabled && (
-                  <div className="p-4 space-y-4 animate-in fade-in slide-in-from-top-2 duration-300">
+                <div className="p-4 space-y-4 animate-in fade-in slide-in-from-top-2 duration-300">
                     <input
                       ref={fixedPositionFileInputRef}
                       type="file"
@@ -1063,6 +1086,7 @@ export const ConfigurationScreen: React.FC = () => {
                             id="fixed-lat" type="number" step="0.00000001"
                             value={config.baseStation.fixedMode.coordinates.latitude}
                             onChange={(e) => updateFixedCoordinates({ latitude: parseFloat(e.target.value) || 0 })}
+                            disabled={!isFixedPositionEditEnabled}
                             className={`${inputClasses} font-mono`}
                           />
                         </div>
@@ -1072,6 +1096,7 @@ export const ConfigurationScreen: React.FC = () => {
                             id="fixed-lon" type="number" step="0.00000001"
                             value={config.baseStation.fixedMode.coordinates.longitude}
                             onChange={(e) => updateFixedCoordinates({ longitude: parseFloat(e.target.value) || 0 })}
+                            disabled={!isFixedPositionEditEnabled}
                             className={`${inputClasses} font-mono`}
                           />
                         </div>
@@ -1081,6 +1106,7 @@ export const ConfigurationScreen: React.FC = () => {
                             id="fixed-alt" type="number" step="0.001"
                             value={config.baseStation.fixedMode.coordinates.altitude}
                             onChange={(e) => updateFixedCoordinates({ altitude: parseFloat(e.target.value) || 0 })}
+                            disabled={!isFixedPositionEditEnabled}
                             className={`${inputClasses} font-mono`}
                           />
                         </div>
@@ -1090,6 +1116,7 @@ export const ConfigurationScreen: React.FC = () => {
                             id="fixed-acc" type="number" step="0.001"
                             value={config.baseStation.fixedMode.coordinates.accuracy}
                             onChange={(e) => updateFixedCoordinates({ accuracy: parseFloat(e.target.value) || 0 })}
+                            disabled={!isFixedPositionEditEnabled}
                             className={`${inputClasses} font-mono`}
                           />
                         </div>
@@ -1100,7 +1127,13 @@ export const ConfigurationScreen: React.FC = () => {
                           <Label className={labelClasses}>X</Label>
                           <Input
                             readOnly
-                            value={importedFixedPosition ? importedFixedPosition.local_xyz.x.toFixed(4) : 'NIL'}
+                            value={
+                              importedFixedPosition
+                                ? importedFixedPosition.local_xyz.x.toFixed(4)
+                                : savedBasePosition
+                                ? Number(savedBasePosition.ecef_x).toFixed(4)
+                                : 'NIL'
+                            }
                             className={`${inputClasses} font-mono opacity-80`}
                           />
                         </div>
@@ -1108,7 +1141,13 @@ export const ConfigurationScreen: React.FC = () => {
                           <Label className={labelClasses}>Y</Label>
                           <Input
                             readOnly
-                            value={importedFixedPosition ? importedFixedPosition.local_xyz.y.toFixed(4) : 'NIL'}
+                            value={
+                              importedFixedPosition
+                                ? importedFixedPosition.local_xyz.y.toFixed(4)
+                                : savedBasePosition
+                                ? Number(savedBasePosition.ecef_y).toFixed(4)
+                                : 'NIL'
+                            }
                             className={`${inputClasses} font-mono opacity-80`}
                           />
                         </div>
@@ -1116,7 +1155,13 @@ export const ConfigurationScreen: React.FC = () => {
                           <Label className={labelClasses}>Z</Label>
                           <Input
                             readOnly
-                            value={importedFixedPosition ? importedFixedPosition.local_xyz.z.toFixed(4) : 'NIL'}
+                            value={
+                              importedFixedPosition
+                                ? importedFixedPosition.local_xyz.z.toFixed(4)
+                                : savedBasePosition
+                                ? Number(savedBasePosition.ecef_z).toFixed(4)
+                                : 'NIL'
+                            }
                             className={`${inputClasses} font-mono opacity-80`}
                           />
                         </div>
@@ -1129,6 +1174,7 @@ export const ConfigurationScreen: React.FC = () => {
                           variant="ghost"
                           className="h-16 rounded-xl border border-slate-200/80 bg-slate-50 text-slate-700 hover:bg-slate-100 hover:text-slate-900 dark:border-slate-800 dark:bg-slate-950/70 dark:text-slate-300 dark:hover:bg-slate-900 flex-col gap-1.5"
                           onClick={handleLoadFixedPositionClick}
+                          disabled={!isFixedPositionEditEnabled}
                         >
                           <MapPin className="size-4 text-blue-500" />
                           <span className="text-[11px] font-semibold tracking-wide">Load</span>
@@ -1138,30 +1184,44 @@ export const ConfigurationScreen: React.FC = () => {
                           variant="ghost"
                           className="h-16 rounded-xl border border-red-200/80 bg-red-50/70 text-red-600 hover:bg-red-50 dark:border-red-950/60 dark:bg-red-950/20 dark:text-red-400 dark:hover:bg-red-950/30 flex-col gap-1.5"
                           onClick={handleDeleteFixedPosition}
-                          disabled={!savedBasePosition && !importedFixedPosition && !config.baseStation.fixedMode.enabled}
+                          disabled={!isFixedPositionEditEnabled || (!savedBasePosition && !importedFixedPosition && !config.baseStation.fixedMode.enabled)}
                         >
                           <Trash2 className="size-4" />
                           <span className="text-[11px] font-semibold tracking-wide">Delete</span>
                         </Button>
                       </div>
                     </div>
-                    {importedFixedPosition && (
-                      <Button
-                        type="button"
-                        className="w-full gap-2 bg-blue-600 hover:bg-blue-700 text-white transition-colors active:scale-95 font-semibold h-11 rounded-lg text-xs tracking-wide shadow-sm disabled:opacity-70 disabled:cursor-not-allowed"
-                        onClick={handleApplyImportedFixedPosition}
-                        disabled={isApplyImportedPositionPending}
-                      >
-                        <Upload className="size-4" />
-                        {isApplyImportedPositionPending ? 'APPLYING TO BASE...' : 'APPLY TO BASE'}
-                      </Button>
-                    )}
-                  </div>
-                )}
+                    <Button
+                      type="button"
+                      className="w-full gap-2 bg-blue-600 hover:bg-blue-700 text-white transition-colors active:scale-95 font-semibold h-11 rounded-lg text-xs tracking-wide shadow-sm disabled:opacity-70 disabled:cursor-not-allowed"
+                      onClick={handleApplyImportedFixedPosition}
+                      disabled={!isFixedPositionEditEnabled || isApplyImportedPositionPending}
+                    >
+                      <Upload className="size-4" />
+                      {isApplyImportedPositionPending ? 'APPLYING TO BASE...' : 'APPLY TO BASE'}
+                    </Button>
+                </div>
               </div>
           </SectionCard>
 
-          <SectionCard title="NTRIP Configuration" description="Manage Caster network connections" icon={Globe} isMobile={isMobile} handleSave={handleSave} hasChanges={hasNtripChanges} actionLabel={isSaving ? 'Saving Details...' : 'Save Details'} actionPending={isSaving}>
+          <SectionCard title="Streaming Configuration" description="Manage streaming links (NTRIP, LoRa)" icon={Globe} isMobile={isMobile} handleSave={handleSave} hasChanges={hasNtripChanges} actionLabel={isSaving ? 'Saving Details...' : 'Save Details'} actionPending={isSaving}>
+
+            {/* NTRIP Block */}
+            <div className="rounded-2xl border border-slate-200 dark:border-slate-800/80 bg-white/70 dark:bg-slate-950/40 p-4 md:p-5 shadow-sm">
+              <div className="flex items-center justify-between gap-3 mb-4">
+                <div>
+                  <div className="text-[10px] font-semibold uppercase tracking-widest text-slate-500 dark:text-slate-400">Streaming</div>
+                  <div className="text-sm font-bold text-slate-900 dark:text-slate-100">NTRIP</div>
+                </div>
+                <Badge variant="outline" className={`text-[10px] font-semibold px-2 py-0.5 rounded-md ${
+                  streams.ntrip.active
+                    ? 'bg-emerald-50 dark:bg-emerald-900/10 border-emerald-200 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300'
+                    : 'bg-white/80 dark:bg-slate-900/50 border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300'
+                }`}>
+                  {streams.ntrip.active ? 'Streaming' : 'Idle'}
+                </Badge>
+              </div>
+
               <Tabs defaultValue="sender" className="w-full flex flex-col">
                 <div className="pb-3">
                   <TabsList className="grid w-full grid-cols-2 bg-slate-100 dark:bg-slate-950/50 p-1 rounded-lg border border-slate-200 dark:border-slate-800/60 h-10">
@@ -1302,6 +1362,66 @@ export const ConfigurationScreen: React.FC = () => {
                   </Button>
                 </TabsContent>
               </Tabs>
+            </div>
+
+            {/* LoRa Block */}
+            <div className="mt-5 rounded-2xl border border-slate-200 dark:border-slate-800/80 bg-white/70 dark:bg-slate-950/40 p-4 md:p-5 shadow-sm">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <div className="text-[10px] font-semibold uppercase tracking-widest text-slate-500 dark:text-slate-400">Streaming</div>
+                  <div className="text-sm font-bold text-slate-900 dark:text-slate-100">LoRa</div>
+                  <div className="text-[11px] font-mono text-slate-500 dark:text-slate-400 mt-1">
+                    PORT: <span className="text-slate-700 dark:text-slate-200">{streams.lora.port || 'NIL'}</span>
+                  </div>
+                </div>
+                <Badge variant="outline" className={`text-[10px] font-semibold px-2 py-0.5 rounded-md ${
+                  streams.lora.enabled
+                    ? 'bg-emerald-50 dark:bg-emerald-900/10 border-emerald-200 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300'
+                    : 'bg-white/80 dark:bg-slate-900/50 border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300'
+                }`}>
+                  {streams.lora.enabled ? (streams.lora.connected ? 'Streaming' : 'Starting') : 'Idle'}
+                </Badge>
+              </div>
+
+              {streams.lora.enabled && (
+                <div className="mt-4 grid grid-cols-2 sm:grid-cols-4 gap-3 p-3 rounded-xl bg-emerald-50 dark:bg-emerald-500/10 border border-emerald-200 dark:border-emerald-500/20 animate-in fade-in">
+                  <div>
+                    <div className="text-[10px] font-semibold text-emerald-700 dark:text-emerald-500 uppercase tracking-wider mb-0.5">Speed</div>
+                    <div className="text-base font-bold font-mono text-emerald-900 dark:text-emerald-400">
+                      {((streams.lora.throughput || 0) / 1024).toFixed(2)}<span className="text-[10px] ml-0.5 text-slate-500">KB/s</span>
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] font-semibold text-emerald-700 dark:text-emerald-500 uppercase tracking-wider mb-0.5">Sent</div>
+                    <div className="text-base font-bold font-mono text-emerald-900 dark:text-emerald-400">
+                      {((streams.lora.bytesSent || 0) / 1024).toFixed(1)}<span className="text-[10px] ml-0.5 text-slate-500">KB</span>
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] font-semibold text-emerald-700 dark:text-emerald-500 uppercase tracking-wider mb-0.5">Uptime</div>
+                    <div className="text-base font-bold font-mono text-emerald-900 dark:text-emerald-400">
+                      {Math.floor((streams.lora.uptime || 0) / 60)}:{String(Math.floor((streams.lora.uptime || 0) % 60)).padStart(2, '0')}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] font-semibold text-emerald-700 dark:text-emerald-500 uppercase tracking-wider mb-0.5">Queue</div>
+                    <div className="text-base font-bold font-mono text-emerald-900 dark:text-emerald-400">{streams.lora.queueSize ?? 0}</div>
+                  </div>
+                </div>
+              )}
+
+              <Button
+                type="button"
+                variant={streams.lora.enabled ? "destructive" : "default"}
+                className={`w-full h-11 rounded-lg text-sm font-semibold tracking-wide transition-transform active:scale-95 shadow-sm mt-4 ${streams.lora.enabled ? 'bg-red-600 hover:bg-red-700' : 'bg-emerald-600 hover:bg-emerald-700 text-white'}`}
+                onClick={handleStartStopLora}
+                disabled={isLoraActionPending}
+              >
+                {isLoraActionPending
+                  ? streams.lora.enabled ? "STOPPING LORA..." : "STARTING LORA..."
+                  : streams.lora.enabled ? "STOP LORA" : "START LORA"}
+              </Button>
+            </div>
           </SectionCard>
 
         </div>

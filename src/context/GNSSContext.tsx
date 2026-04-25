@@ -69,6 +69,8 @@ type GNSSContextType = {
   exportLogsCSV: () => Promise<void>;
   startNTRIP: (host: string, port: number, mountpoint: string, password: string, username?: string) => Promise<void>;
   stopNTRIP: () => Promise<void>;
+  startLora: () => Promise<void>;
+  stopLora: () => Promise<void>;
   savedBasePosition: SavedBasePosition | null;
   fixedBaseReference: {
     llh: { latitude: number; longitude: number; height_ellipsoid: number };
@@ -105,6 +107,7 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const intentionalDisconnectRef = useRef(false);
   const startPendingRef = useRef(false);
   const lastNtripSampleRef = useRef<{ bytesSent: number; at: number } | null>(null);
+  const lastLoraSampleRef = useRef<{ bytesSent: number; at: number } | null>(null);
   const startInitiatedAtRef = useRef(0);
   const inactiveSurveyReportsRef = useRef(0);
   const lastSurveyActiveAtRef = useRef(0);
@@ -163,6 +166,21 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
     serial: { ...defaultStream },
     rtcm: { ...defaultStream, msmType: "MSM4", activeMessages: [] },
     ntrip: { ...defaultStream, mountpoint: "", uptime: 0, dataSent: 0, dataReceived: 0, lastError: null },
+    lora: {
+      ...defaultStream,
+      connected: false,
+      port: "",
+      baudrate: 0,
+      packetSize: 0,
+      bytesSent: 0,
+      framesSent: 0,
+      writeErrors: 0,
+      connectAttempts: 0,
+      dataRateBps: 0,
+      uptime: 0,
+      lastSendTime: null,
+      queueSize: 0,
+    },
     tcp: { ...defaultStream, connectedClients: 0 },
     udp: { ...defaultStream },
   };
@@ -699,7 +717,11 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
         setFixedBaseReference(
           nextPosition
             ? {
-                llh: { latitude: 0, longitude: 0, height_ellipsoid: 0 },
+                llh: {
+                  latitude: Number(nextPosition.latitude ?? 0),
+                  longitude: Number(nextPosition.longitude ?? 0),
+                  height_ellipsoid: Number(nextPosition.altitude ?? 0),
+                },
                 fixed_pos_acc: Number(nextPosition.accuracy ?? 0),
               }
             : null
@@ -1391,6 +1413,28 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
     );
   }, []);
 
+  const waitForLoraState = useCallback(async (targetEnabled: boolean, timeoutMs = 12000) => {
+    const startedAt = Date.now();
+
+    while ((Date.now() - startedAt) < timeoutMs) {
+      const status = await api.getStatusLora().catch(() => null);
+      if (status) {
+        const isEnabled = Boolean(status.enabled);
+        if (targetEnabled ? isEnabled : !isEnabled) {
+          return status;
+        }
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 700));
+    }
+
+    throw new Error(
+      targetEnabled
+        ? 'LoRa did not confirm a start in time.'
+        : 'LoRa did not confirm a stop in time.'
+    );
+  }, []);
+
   /* ================= NTRIP FUNCTIONS ================= */
   const startNTRIP = useCallback(async (host: string, port: number, mountpoint: string, password: string, username?: string) => {
     try {
@@ -1463,6 +1507,91 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   }, [addLog, isOfflinePreview, waitForNtripState]);
 
+  /* ================= LORA FUNCTIONS ================= */
+  const startLora = useCallback(async () => {
+    try {
+      if (isOfflinePreview) {
+        setStreams((prev) => ({
+          ...prev,
+          lora: { ...prev.lora, enabled: true, active: false },
+        }));
+        toast.info('Offline preview mode does not connect to LoRa');
+        return;
+      }
+
+      addLog('info', 'Starting LoRa');
+      setStreams((prev) => ({
+        ...prev,
+        lora: { ...prev.lora, enabled: true, active: false },
+      }));
+      await api.startLora();
+      const confirmedStatus = await waitForLoraState(true);
+      setStreams((prev) => ({
+        ...prev,
+        lora: {
+          ...prev.lora,
+          enabled: Boolean(confirmedStatus.enabled ?? true),
+          active: Boolean(confirmedStatus.enabled ?? true),
+          connected: Boolean(confirmedStatus.connected ?? false),
+          port: String(confirmedStatus.port ?? prev.lora.port ?? ""),
+          baudrate: Number(confirmedStatus.baudrate ?? prev.lora.baudrate ?? 0),
+          packetSize: Number(confirmedStatus.packet_size ?? prev.lora.packetSize ?? 0),
+          bytesSent: Number(confirmedStatus.bytes_sent ?? prev.lora.bytesSent ?? 0),
+          framesSent: Number(confirmedStatus.frames_sent ?? prev.lora.framesSent ?? 0),
+          writeErrors: Number(confirmedStatus.write_errors ?? prev.lora.writeErrors ?? 0),
+          connectAttempts: Number(confirmedStatus.connect_attempts ?? prev.lora.connectAttempts ?? 0),
+          dataRateBps: Number(confirmedStatus.data_rate_bps ?? prev.lora.dataRateBps ?? 0),
+          throughput: Number(confirmedStatus.data_rate_bps ?? 0) > 0 ? Number(confirmedStatus.data_rate_bps) / 8 : prev.lora.throughput,
+          uptime: Number(confirmedStatus.uptime ?? prev.lora.uptime ?? 0),
+          lastSendTime: confirmedStatus.last_send_time ?? prev.lora.lastSendTime ?? null,
+          queueSize: Number(confirmedStatus.queue_size ?? prev.lora.queueSize ?? 0),
+        },
+      }));
+      addLog('info', 'LoRa started successfully');
+    } catch (error) {
+      setStreams((prev) => ({
+        ...prev,
+        lora: { ...prev.lora, enabled: false, active: false, throughput: 0 },
+      }));
+      addLog('error', `LoRa start failed: ${String(error)}`);
+      throw error;
+    }
+  }, [addLog, isOfflinePreview, waitForLoraState]);
+
+  const stopLora = useCallback(async () => {
+    try {
+      if (isOfflinePreview) {
+        setStreams((prev) => ({
+          ...prev,
+          lora: {
+            ...prev.lora,
+            enabled: false,
+            active: false,
+            throughput: 0,
+            uptime: 0,
+            bytesSent: 0,
+            framesSent: 0,
+            dataRateBps: 0,
+          },
+        }));
+        toast.info('Offline preview mode stopped local LoRa preview state');
+        return;
+      }
+
+      addLog('info', 'Stopping LoRa');
+      setStreams((prev) => ({
+        ...prev,
+        lora: { ...prev.lora, enabled: false, active: false, throughput: 0 },
+      }));
+      await api.stopLora();
+      await waitForLoraState(false);
+      addLog('info', 'LoRa stopped successfully');
+    } catch (error) {
+      addLog('error', `LoRa stop failed: ${String(error)}`);
+      throw error;
+    }
+  }, [addLog, isOfflinePreview, waitForLoraState]);
+
   const applyFixedBasePosition = useCallback(async (config: {
     latitude: number;
     longitude: number;
@@ -1482,7 +1611,7 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
       fixed_pos_acc: config.accuracyMeters,
       msm_type: config.msmType ?? "MSM4",
       enable_rtcm: true,
-      save_to_flash: false,
+      save_to_flash: true,
     });
 
     setFixedBaseReference({
@@ -1820,6 +1949,67 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return () => clearInterval(pollInterval);
   }, [connection.isConnected, isOfflinePreview]);
 
+  /* ================= LORA STATUS POLL ================= */
+  useEffect(() => {
+    if (isOfflinePreview) return;
+
+    const pollInterval = setInterval(async () => {
+      if (!connection.isConnected) return;
+      try {
+        const loraStatus = await api.getStatusLora().catch(() => null);
+        if (!loraStatus) return;
+
+        const nextBytesSent = Number(loraStatus.bytes_sent ?? 0);
+        const nextUptime = Number(loraStatus.uptime ?? 0);
+        const now = Date.now();
+        const previousSample = lastLoraSampleRef.current;
+
+        let computedThroughput = 0;
+        const reportedBps = Number(loraStatus.data_rate_bps ?? 0);
+        if (reportedBps > 0) {
+          computedThroughput = reportedBps / 8;
+        } else if (
+          previousSample &&
+          nextBytesSent >= previousSample.bytesSent &&
+          now > previousSample.at
+        ) {
+          const elapsedSeconds = (now - previousSample.at) / 1000;
+          if (elapsedSeconds > 0) {
+            computedThroughput = (nextBytesSent - previousSample.bytesSent) / elapsedSeconds;
+          }
+        }
+
+        lastLoraSampleRef.current = { bytesSent: nextBytesSent, at: now };
+
+        setStreams((prev) => ({
+          ...prev,
+          lora: {
+            ...prev.lora,
+            enabled: Boolean(loraStatus.enabled ?? false),
+            active: Boolean(loraStatus.enabled ?? false),
+            connected: Boolean(loraStatus.connected ?? false),
+            port: String(loraStatus.port ?? prev.lora.port ?? ""),
+            baudrate: Number(loraStatus.baudrate ?? prev.lora.baudrate ?? 0),
+            packetSize: Number(loraStatus.packet_size ?? prev.lora.packetSize ?? 0),
+            bytesSent: nextBytesSent,
+            framesSent: Number(loraStatus.frames_sent ?? prev.lora.framesSent ?? 0),
+            writeErrors: Number(loraStatus.write_errors ?? prev.lora.writeErrors ?? 0),
+            connectAttempts: Number(loraStatus.connect_attempts ?? prev.lora.connectAttempts ?? 0),
+            dataRateBps: reportedBps,
+            throughput: computedThroughput,
+            uptime: nextUptime,
+            lastSendTime: loraStatus.last_send_time ?? prev.lora.lastSendTime ?? null,
+            queueSize: Number(loraStatus.queue_size ?? prev.lora.queueSize ?? 0),
+          },
+        }));
+      } catch (e) {
+        console.warn("LoRa status poll failed:", e);
+      }
+    }, 2000);
+
+    return () => clearInterval(pollInterval);
+  }, [connection.isConnected, isOfflinePreview]);
+
   useEffect(() => {
     if (isOfflinePreview) return;
 
@@ -1899,6 +2089,8 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
       exportLogsCSV,
       startNTRIP,
       stopNTRIP,
+      startLora,
+      stopLora,
       savedBasePosition,
       fixedBaseReference,
       isFixedBaseDisplayActive,
@@ -1908,7 +2100,7 @@ export const GNSSProvider: React.FC<{ children: React.ReactNode }> = ({ children
       confirmResurvey,
       skipResurvey,
     }),
-    [connection, isOfflinePreview, survey, isAutoFlowActive, isAutoFlowSessionActive, autoFlowRuntime, gnssStatus, streams, configuration, settings, surveyHistory, logs, savedBasePosition, fixedBaseReference, isFixedBaseDisplayActive, enterOfflinePreview, exitOfflinePreview, connectToDevice, disconnect, startSurvey, stopSurvey, toggleStream, updateConfiguration, updateSettings, scanWiFi, scanBLE, addLog, clearLogs, deleteLogs, clearSurveyHistory, deleteSurveys, exportHistoryCSV, exportLogsCSV, startNTRIP, stopNTRIP, applyFixedBasePosition, deleteSavedPosition, confirmResurvey, skipResurvey]
+    [connection, isOfflinePreview, survey, isAutoFlowActive, isAutoFlowSessionActive, autoFlowRuntime, gnssStatus, streams, configuration, settings, surveyHistory, logs, savedBasePosition, fixedBaseReference, isFixedBaseDisplayActive, enterOfflinePreview, exitOfflinePreview, connectToDevice, disconnect, startSurvey, stopSurvey, toggleStream, updateConfiguration, updateSettings, scanWiFi, scanBLE, addLog, clearLogs, deleteLogs, clearSurveyHistory, deleteSurveys, exportHistoryCSV, exportLogsCSV, startNTRIP, stopNTRIP, startLora, stopLora, applyFixedBasePosition, deleteSavedPosition, confirmResurvey, skipResurvey]
   );
 
   return (

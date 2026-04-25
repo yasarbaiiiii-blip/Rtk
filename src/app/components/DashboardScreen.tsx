@@ -3,9 +3,11 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import { SurveyStatus } from './dashboard/SurveyStatus';
 import { GNSSStatusTab } from './dashboard/GNSSStatusTab';
 import { Satellite, Activity } from 'lucide-react';
+import { useGNSS } from '../../context/GNSSContext';
 
 export const DashboardScreen: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'survey' | 'gnss'>('survey');
+  const { streams } = useGNSS();
 
   return (
     // Light: Soft clean slate | Dark: Deep navy/slate-950
@@ -29,6 +31,38 @@ export const DashboardScreen: React.FC = () => {
             <h1 className="text-3xl font-bold tracking-tight text-slate-900 dark:text-slate-50">
               Dashboard
             </h1>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-end gap-2 md:gap-3">
+            {streams.ntrip.active && (
+              <div className="flex items-center gap-3 rounded-xl border border-emerald-200 dark:border-emerald-900/40 bg-emerald-50/70 dark:bg-emerald-900/10 px-3 py-2">
+                <div className="text-[10px] font-bold uppercase tracking-widest text-emerald-700 dark:text-emerald-300">NTRIP</div>
+                <div className="text-xs font-mono font-bold text-slate-900 dark:text-emerald-200">
+                  {((streams.ntrip.throughput || 0) / 1024).toFixed(2)} KB/s
+                </div>
+                <div className="text-xs font-mono font-semibold text-slate-700 dark:text-slate-300">
+                  {((streams.ntrip.dataSent || 0) / 1024).toFixed(1)} KB
+                </div>
+                <div className="text-xs font-mono font-semibold text-slate-700 dark:text-slate-300">
+                  {Math.floor((streams.ntrip.uptime || 0) / 60)}:{String(Math.floor((streams.ntrip.uptime || 0) % 60)).padStart(2, '0')}
+                </div>
+              </div>
+            )}
+
+            {streams.lora.enabled && (
+              <div className="flex items-center gap-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-white/80 dark:bg-slate-900/40 px-3 py-2">
+                <div className="text-[10px] font-bold uppercase tracking-widest text-slate-600 dark:text-slate-300">LORA</div>
+                <div className="text-xs font-mono font-bold text-slate-900 dark:text-slate-100">
+                  {((streams.lora.throughput || 0) / 1024).toFixed(2)} KB/s
+                </div>
+                <div className="text-xs font-mono font-semibold text-slate-700 dark:text-slate-300">
+                  {((streams.lora.bytesSent || 0) / 1024).toFixed(1)} KB
+                </div>
+                <div className="text-xs font-mono font-semibold text-slate-700 dark:text-slate-300">
+                  {Math.floor((streams.lora.uptime || 0) / 60)}:{String(Math.floor((streams.lora.uptime || 0) % 60)).padStart(2, '0')}
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Segmented Control Tabs */}

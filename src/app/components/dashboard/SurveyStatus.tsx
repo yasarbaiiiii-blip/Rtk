@@ -774,10 +774,13 @@ export const SurveyStatus: React.FC = () => {
     }
 
     if (savedBasePosition) {
+      const x = Number(savedBasePosition.ecef_x);
+      const y = Number(savedBasePosition.ecef_y);
+      const z = Number(savedBasePosition.ecef_z);
       return {
-        lat: savedBasePosition.ecef_x.toFixed(4),
-        lon: savedBasePosition.ecef_y.toFixed(4),
-        alt: savedBasePosition.ecef_z.toFixed(4),
+        lat: Number.isFinite(x) ? x.toFixed(4) : 'NIL',
+        lon: Number.isFinite(y) ? y.toFixed(4) : 'NIL',
+        alt: Number.isFinite(z) ? z.toFixed(4) : 'NIL',
       };
     }
 
@@ -860,17 +863,21 @@ export const SurveyStatus: React.FC = () => {
     const inputName = window.prompt('Enter file name', defaultName);
     if (!inputName) return;
 
-    const lat = Number(gnssStatus.globalPosition.latitude);
-    const lon = Number(gnssStatus.globalPosition.longitude);
-    const alt = Number(gnssStatus.globalPosition.altitude);
-    const accuracy = Number(survey.position.accuracy);
+    if (!savedBasePosition) {
+      toast.error('No saved base position found (cannot export accuracy).');
+      return;
+    }
+
+    const lat = Number(savedBasePosition.latitude);
+    const lon = Number(savedBasePosition.longitude);
+    const alt = Number(savedBasePosition.altitude);
+    const accuracy = Number(savedBasePosition.accuracy);
 
     if (![lat, lon, alt].every((v) => Number.isFinite(v)) || lat === 0 || lon === 0) {
       toast.error('No valid global position to export');
       return;
     }
 
-    const ecef = llhToEcef(lat, lon, alt);
     const payload = {
       format: 'gnss-position-export',
       version: 1,
@@ -878,7 +885,7 @@ export const SurveyStatus: React.FC = () => {
       exported_at: new Date().toISOString(),
       accuracy_m: Number.isFinite(accuracy) ? accuracy : 0,
       global_llh: { latitude: lat, longitude: lon, altitude: alt },
-      local_xyz: { x: ecef.x, y: ecef.y, z: ecef.z },
+      local_xyz: { x: savedBasePosition.ecef_x, y: savedBasePosition.ecef_y, z: savedBasePosition.ecef_z },
     };
 
     try {
@@ -1005,17 +1012,21 @@ export const SurveyStatus: React.FC = () => {
     }
   }, [survey.isActive, survey.currentAccuracy, clampedElapsedTime]);
 
-  const livePositionAccuracyCm = gnssStatus.globalPosition.horizontalAccuracy > 0
-    ? gnssStatus.globalPosition.horizontalAccuracy * 100
+  const livePositionAccuracyM = gnssStatus.globalPosition.horizontalAccuracy > 0
+    ? Number(gnssStatus.globalPosition.horizontalAccuracy)
     : 0;
-  const savedPositionAccuracyCm = savedBasePosition?.accuracy && savedBasePosition.accuracy > 0
-    ? savedBasePosition.accuracy * 100
+  const savedPositionAccuracyM = savedBasePosition?.accuracy && savedBasePosition.accuracy > 0
+    ? Number(savedBasePosition.accuracy)
     : 0;
-  const displayAccuracy = survey.isActive || survey.status === 'initializing'
-    ? (livePositionAccuracyCm > 0 ? livePositionAccuracyCm : survey.currentAccuracy)
-    : (savedPositionAccuracyCm > 0
-      ? savedPositionAccuracyCm
-      : (!survey.isActive && lockedAccuracy.current > 0 ? lockedAccuracy.current : 0));
+
+  // Rule:
+  // - While surveying: use /api/v1/status/position accuracy (horizontal)
+  // - After completion: use saved-position accuracy; if NIL fallback to /status/position
+  const displayAccuracyCm = (survey.isActive || survey.status === 'initializing')
+    ? (livePositionAccuracyM > 0 ? livePositionAccuracyM * 100 : 0)
+    : (savedPositionAccuracyM > 0
+      ? savedPositionAccuracyM * 100
+      : (livePositionAccuracyM > 0 ? livePositionAccuracyM * 100 : (!savedBasePosition && lockedAccuracy.current > 0 ? lockedAccuracy.current : 0)));
   const displaySatelliteCount = survey.satelliteCount > 0
     ? survey.satelliteCount
     : gnssStatus.satellites.length > 0
@@ -1124,8 +1135,8 @@ export const SurveyStatus: React.FC = () => {
                 <div className="text-center p-4 rounded-xl bg-slate-50 dark:bg-slate-950/50 border border-slate-200 dark:border-slate-800/80 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer">
                   <CheckCircle2 className="size-5 mx-auto mb-2 text-orange-500" />
                   <div className="text-2xl font-bold font-mono text-orange-600 dark:text-orange-500">
-                    {displayAccuracy > 0 ? parseFloat((displayAccuracy).toFixed(1)) : 'NIL'}
-                    {displayAccuracy > 0 && <span className="text-xs font-sans font-semibold ml-1">cm</span>}
+                    {displayAccuracyCm > 0 ? parseFloat((displayAccuracyCm).toFixed(1)) : 'NIL'}
+                    {displayAccuracyCm > 0 && <span className="text-xs font-sans font-semibold ml-1">cm</span>}
                   </div>
                   <div className="text-xs font-semibold text-slate-500 dark:text-slate-400 mt-1">
                     {accuracyHistory.length > 1 ? 'Accuracy (Click)' : 'Accuracy'}
@@ -1298,7 +1309,13 @@ export const SurveyStatus: React.FC = () => {
                 </Badge>
               )}
               <div className="text-[11px] font-mono font-bold text-slate-600 dark:text-slate-400 bg-white dark:bg-slate-900 px-2 py-1 rounded-md border border-slate-200 dark:border-slate-800">
-                ±{survey.position.accuracy > 0 ? survey.position.accuracy.toFixed(3) : 'NIL'}m
+                ±{
+                  survey.isActive
+                    ? (gnssStatus.globalPosition.horizontalAccuracy > 0 ? Number(gnssStatus.globalPosition.horizontalAccuracy).toFixed(3) : 'NIL')
+                    : (savedBasePosition?.accuracy && savedBasePosition.accuracy > 0
+                      ? Number(savedBasePosition.accuracy).toFixed(3)
+                      : (gnssStatus.globalPosition.horizontalAccuracy > 0 ? Number(gnssStatus.globalPosition.horizontalAccuracy).toFixed(3) : 'NIL'))
+                }m
               </div>
             </div>
           </div>

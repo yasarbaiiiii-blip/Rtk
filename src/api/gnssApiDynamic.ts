@@ -48,6 +48,7 @@ export const api = {
   getStatusRTCM: async () => fetch(`${requireApiBase()}/api/v1/status/rtcm`).then(handleResponse),
   getStatusNTRIP: async () => fetch(`${requireApiBase()}/api/v1/status/ntrip`).then(handleResponse),
   getStatusSurvey: async () => fetch(`${requireApiBase()}/api/v1/status/survey`).then(handleResponse),
+  getStatusLora: async () => fetch(`${requireApiBase()}/api/v1/lora/status`).then(handleResponse),
   getSavedBasePosition: async () => fetch(`${requireApiBase()}/api/v1/base/saved-position`).then(handleResponse),
   deleteSavedBasePosition: async (confirm: boolean = true) => {
     const base = requireApiBase();
@@ -169,6 +170,24 @@ export const api = {
     const base = requireApiBase();
     console.log(`API Request [POST] ${base}/api/v1/ntrip/stop:`, {});
     return fetch(`${base}/api/v1/ntrip/stop`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    }).then(handleResponse);
+  },
+
+  startLora: async () => {
+    const base = requireApiBase();
+    console.log(`API Request [POST] ${base}/api/v1/lora/start:`, {});
+    return fetch(`${base}/api/v1/lora/start`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    }).then(handleResponse);
+  },
+
+  stopLora: async () => {
+    const base = requireApiBase();
+    console.log(`API Request [POST] ${base}/api/v1/lora/stop:`, {});
+    return fetch(`${base}/api/v1/lora/stop`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
     }).then(handleResponse);

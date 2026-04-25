@@ -108,6 +108,21 @@ export interface NTRIPStream extends StreamInfo {
   lastError: string | null;
 }
 
+export interface LoraStream extends StreamInfo {
+  connected: boolean;
+  port: string;
+  baudrate: number;
+  packetSize: number;
+  bytesSent: number;
+  framesSent: number;
+  writeErrors: number;
+  connectAttempts: number;
+  dataRateBps: number;
+  uptime: number;
+  lastSendTime: string | null;
+  queueSize: number;
+}
+
 export interface RTCMStream extends StreamInfo {
   msmType: string;
   activeMessages: string[];
@@ -117,6 +132,7 @@ export interface StreamState {
   serial: StreamInfo;
   rtcm: RTCMStream;
   ntrip: NTRIPStream;
+  lora: LoraStream;
   tcp: StreamInfo & { connectedClients: number };
   udp: StreamInfo;
 }
@@ -125,6 +141,9 @@ export interface SavedBasePosition {
   ecef_x: number;
   ecef_y: number;
   ecef_z: number;
+  latitude?: number;
+  longitude?: number;
+  altitude?: number;
   accuracy: number;
   surveyed_at?: string;
 }
